@@ -19,9 +19,6 @@ logs
 .env.*
 !.env.example
 
-# local storage provider (dev folder)
-storage/
-
 # caches & typescript
 .eslintcache
 .cache
