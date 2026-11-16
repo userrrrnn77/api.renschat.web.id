@@ -5,6 +5,7 @@ import {
   presignUpload,
   completeUpload,
   getFileMeta,
+  getFileUrl,
   downloadFile,
   getFileContent,
   deleteFile,
@@ -16,6 +17,7 @@ export const filesRouter = Router();
 filesRouter.post("/presign", filesLimiter, presignUpload);
 filesRouter.post("/:id/complete", filesLimiter, completeUpload);
 filesRouter.get("/:id", getFileMeta);
+filesRouter.get("/:id/url", filesLimiter, getFileUrl);
 filesRouter.get("/:id/download", filesLimiter, downloadFile);
 filesRouter.get("/:id/content", filesLimiter, getFileContent);
 filesRouter.delete("/:id", deleteFile);

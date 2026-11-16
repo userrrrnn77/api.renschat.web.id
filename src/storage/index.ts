@@ -20,6 +20,10 @@ export interface PresignPutOptions {
   expiresInSec: number;
 }
 
+export interface PresignGetOptions {
+  expiresInSec: number;
+}
+
 export interface PresignedPut {
   key: string;
   url: string;
@@ -38,6 +42,8 @@ export interface StorageProvider {
     name: string,
     opts: PresignPutOptions,
   ): Promise<PresignedPut>;
+  /** Presigned GET untuk <img>/<video> FE (§7.4). Key tidak pernah ke FE. */
+  presignGet(key: string, opts: PresignGetOptions): Promise<string>;
   head(key: string): Promise<StorageHeadResult | null>;
   getStream(key: string): Promise<ReadableStream<Uint8Array>>;
   /** Kalau maxBytes undefined → baca seluruh objek. */

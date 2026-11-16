@@ -16,21 +16,48 @@ import {
   resumePendingEmbeddings,
   resumePendingIngestion,
 } from "./src/services/ingest/index.js";
+import {
+  recoverStaleJobs,
+  startJobRecoveryScheduler,
+  stopJobRecoveryScheduler,
+} from "./src/services/generation/job.runner.js";
 
 async function bootstrap(): Promise<void> {
   await connectToDatabase();
-  startCleanup();
 
-  // Recover state from a previous crash:
+  // §7.6: scheduler in-process (cleanup 15 menit + recovery periodic)
+  // hanya berjalan bila ENABLE_IN_PROCESS_SCHEDULER=true. Bila false,
+  // trigger lewat POST /internal/cron/flush-assets (CRON_SECRET) dari
+  // cron eksternal.
+  if (env.ENABLE_IN_PROCESS_SCHEDULER) {
+    startCleanup();
+    startJobRecoveryScheduler();
+  }
+
+  // Recover state from a previous crash — selalu dijalankan sekali saat
+  // boot, terlepas dari flag scheduler.
   //   1. Files stuck at status="processing" (extraction mid-flight)
   //   2. Files with indexStatus="pending"/"indexing" (embedding mid-flight)
-  // Both are idempotent and non-blocking; actual work enqueues.
+  //   3. GenerationJob queued/running yang lebih tua dari JOB_STALE_MS
+  //      (§12.2) — mark failed + refund kredit.
   await resumePendingIngestion();
   await resumePendingEmbeddings();
+  try {
+    await recoverStaleJobs();
+  } catch (err) {
+    logger.warn({ err }, "recoverStaleJobs failed");
+  }
 
   const app = buildApp();
   const server = app.listen(env.PORT, () => {
-    logger.info({ port: env.PORT, env: env.NODE_ENV }, "server listening");
+    logger.info(
+      {
+        port: env.PORT,
+        env: env.NODE_ENV,
+        inProcessScheduler: env.ENABLE_IN_PROCESS_SCHEDULER,
+      },
+      "server listening",
+    );
   });
 
   let shuttingDown = false;
@@ -77,6 +104,7 @@ async function bootstrap(): Promise<void> {
     }
 
     stopCleanup();
+    stopJobRecoveryScheduler();
 
     try {
       await mongoose.disconnect();

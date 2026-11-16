@@ -4,6 +4,7 @@ import type { z } from "zod";
 import type { Types } from "mongoose";
 import type { Block } from "../blocks/schemas.js";
 import type { ClarificationQuestion } from "../orchestrator/clarification.js";
+import type { GenerationPlan } from "../generation/plan.js";
 
 export interface ToolContext {
   userId: Types.ObjectId;
@@ -15,6 +16,8 @@ export interface ToolContext {
   emitBlock: (block: Block) => void;
   /** Iterasi loop (0-based). */
   iteration: number;
+  /** Plan generation turn ini (model/engine/kredit diputus server, §5.2). */
+  generation: GenerationPlan;
   /**
    * Minta klarifikasi ke user (hold-and-resume). Bila tidak tersedia,
    * tool yang butuh klarifikasi harus fallback ke perilaku lama.
@@ -32,7 +35,7 @@ export interface ToolResult {
 
 export interface ToolDef {
   name: string;
-  kind: "ui" | "file" | "attachment" | "command";
+  kind: "ui" | "file" | "attachment" | "command" | "media";
   description: string;
   schema: z.ZodTypeAny;
   run: (args: unknown, ctx: ToolContext) => Promise<ToolResult>;

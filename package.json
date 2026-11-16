@@ -7,6 +7,8 @@
     "dev": "bun --watch --env-file=.env server.ts",
     "start": "bun --env-file=.env server.ts",
     "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:unit": "bun test tests/unit",
     "probe": "bun --env-file=.env scripts/probe.ts",
     "check-models": "bun --env-file=.env scripts/checkModels.ts",
     "fence-demo": "bun --env-file=.env scripts/fence-demo.ts",

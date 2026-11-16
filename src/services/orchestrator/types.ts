@@ -1,6 +1,7 @@
 // src/services/orchestrator/types.ts
 import type { Types } from "mongoose";
 import type { Block } from "../blocks/schemas.js";
+import type { GenerationInput } from "../generation/plan.js";
 import type { ChatMessage, Usage } from "../llm/nvidiaClient.js";
 
 export type Phase =
@@ -37,6 +38,8 @@ export interface RunTurnInput {
   userMessageId: Types.ObjectId;
   text: string;
   attachmentIds: string[];
+  /** Pilihan generation dari FE (opsional, §7.7); di-resolve jadi plan di runTurn. */
+  generation?: GenerationInput;
   sseSend: SseSend;
   signal: AbortSignal;
   hooks?: OrchestratorHooks;

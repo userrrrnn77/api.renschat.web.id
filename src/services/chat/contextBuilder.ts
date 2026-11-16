@@ -5,6 +5,7 @@ import { env } from "../../config/env.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { ChunkModel } from "../../models/Chunk.js";
 import { FileDocModel } from "../../models/FileDoc.js";
+import type { GenerationPlan } from "../generation/plan.js";
 
 export function estimateTokens(s: string): number {
   return Math.ceil(s.length / 3.5);
@@ -140,6 +141,12 @@ export function blocksToText(blocks: Block[]): string {
       case "image":
         parts.push(`[image: id=${b.fileId}${b.alt ? ` alt="${b.alt}"` : ""}]`);
         break;
+      case "video": {
+        // History-safe ringkasan (§14.2), tanpa data besar.
+        const dur = b.durationSec !== undefined ? `, ${b.durationSec} dtk` : "";
+        parts.push(`[video dibuat: ${b.aspect}${dur}]`);
+        break;
+      }
       case "table":
         parts.push(clampText(tableToText(b), MAX_STRUCTURED_BLOCK_CHARS));
         break;
@@ -193,6 +200,8 @@ export interface BuildContextInput {
   history: ContextMessage[];
   currentUserText: string;
   toolsAvailable: string[];
+  /** Plan generation turn ini; diteruskan ke buildSystemPrompt (§8.7). */
+  generation?: GenerationPlan;
   files: ContextFileDoc[];
   attachmentIds: string[];
   /** Fase 2: grounded message dari retrieval, disisipkan sebelum user terakhir. */
@@ -281,6 +290,9 @@ export async function buildContext(
       role: "system",
       content: buildSystemPrompt({
         toolsAvailable: input.toolsAvailable,
+        ...(input.generation !== undefined
+          ? { generation: input.generation }
+          : {}),
       }),
     },
   ];

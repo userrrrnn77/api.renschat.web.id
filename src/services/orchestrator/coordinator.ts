@@ -14,7 +14,8 @@ import {
   estimateTokens,
 } from "../chat/contextBuilder.js";
 import { generateTitle } from "../chat/titler.js";
-import { buildToolDefinitions, listToolNames } from "../tools/index.js";
+import { buildToolDefinitions, listTools } from "../tools/index.js";
+import { resolveGenerationPlan } from "../generation/plan.js";
 import { maybeSummarize } from "../chat/summarizer.js";
 import { checkSafety } from "../safety/guard.js";
 import { BlockEmitter } from "../chat/blockEmitter.js";
@@ -110,6 +111,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     userMessageId,
     text,
     attachmentIds,
+    generation,
     sseSend,
     signal,
   } = input;
@@ -118,59 +120,49 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
   const emitter = new BlockEmitter(sseSend);
 
   // ── Stage A: Paralel loading ─────────────────────────────────────
-  const [
-    session,
-    user,
-    history,
-    files,
-    attachmentDigests,
-    safety,
-    preEmbedVec,
-  ] = await Promise.all([
-    SessionModel.findOne({ _id: sessionId, userId }).lean(),
-    UserModel.findById(userId).lean(),
-    MessageModel.find({
-      sessionId,
-      _id: { $ne: userMessageId },
-      summarized: { $ne: true },
-    })
-      .sort({ createdAt: 1 })
-      .lean(),
-    FileDocModel.find({
-      sessionId,
-      status: { $in: ["ready", "processing"] },
-    })
-      .sort({ createdAt: 1 })
-      .lean(),
-    (async () => {
-      if (attachmentIds.length === 0) return [];
-      const attDocs = await FileDocModel.find({ _id: { $in: attachmentIds } })
-        .select({ mime: 1, digest: 1 })
-        .lean();
-      return attDocs
-        .filter((d) => d.mime.startsWith("image/") && d.digest !== undefined)
-        .map((d) => ({
-          summary: d.digest?.summary,
-          ocrText: d.digest?.ocrText,
-        }));
-    })(),
-    (async () => {
-      // Safety butuh attachmentDigests — dijalankan setelah Promise.all
-      // untuk kebersihan dependency. Placeholder agar Promise.all tidak
-      // memblokir. Sebenarnya safety dijalankan di bawah setelah semua load.
-      return null;
-    })(),
-    (async () => {
-      if (!env.EMBEDDING_ENABLED) return null;
-      try {
-        const vecs = await embedTexts([text], "query");
-        return vecs[0] ?? null;
-      } catch (err) {
-        logger.warn({ err }, "pre-embed query failed");
-        return null;
-      }
-    })(),
-  ]);
+  const [session, user, history, files, attachmentDigests, preEmbedVec] =
+    await Promise.all([
+      SessionModel.findOne({ _id: sessionId, userId }).lean(),
+      UserModel.findById(userId).lean(),
+      MessageModel.find({
+        sessionId,
+        _id: { $ne: userMessageId },
+        summarized: { $ne: true },
+      })
+        .sort({ createdAt: 1 })
+        .lean(),
+      // §6.4 efek samping 1: manifest file tidak boleh memuat media
+      // generated yang sudah expired/flushed.
+      FileDocModel.find({
+        sessionId,
+        status: { $in: ["ready", "processing"] },
+        expired: { $ne: true },
+      })
+        .sort({ createdAt: 1 })
+        .lean(),
+      (async () => {
+        if (attachmentIds.length === 0) return [];
+        const attDocs = await FileDocModel.find({ _id: { $in: attachmentIds } })
+          .select({ mime: 1, digest: 1 })
+          .lean();
+        return attDocs
+          .filter((d) => d.mime.startsWith("image/") && d.digest !== undefined)
+          .map((d) => ({
+            summary: d.digest?.summary,
+            ocrText: d.digest?.ocrText,
+          }));
+      })(),
+      (async () => {
+        if (!env.EMBEDDING_ENABLED) return null;
+        try {
+          const vecs = await embedTexts([text], "query");
+          return vecs[0] ?? null;
+        } catch (err) {
+          logger.warn({ err }, "pre-embed query failed");
+          return null;
+        }
+      })(),
+    ]);
 
   if (!session) throw AppError.notFound();
   if (!user) throw AppError.unauthorized();
@@ -183,6 +175,14 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
   let savedSources: SourcePayload[] | undefined;
 
   try {
+    // ── Generation plan (§8): dihitung di server, bukan oleh model.
+    // Error entitlement/kill-switch di sini ikut jalur catch di bawah
+    // supaya AppError.code sampai ke SSE event error.
+    const plan = await resolveGenerationPlan(user, generation);
+    const allowedToolNames = listTools()
+      .filter((t) => t.kind !== "media" || plan.allowedMediaTools.has(t.name))
+      .map((t) => t.name);
+
     // ── Wait attachments (jika ada) ─────────────────────────────────
     if (attachmentIds.length > 0) {
       await waitForReady(attachmentIds, ATTACHMENT_WAIT_MS, signal);
@@ -273,19 +273,25 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
 
     // ── Clarification detection ─────────────────────────────────────
     let augmentedText = text;
-    const question = detectClarification({
-      text,
-      attachmentIds,
-      files: files.map((f) => ({
-        _id: f._id,
-        name: f.name,
-        status: f.status,
-        origin: f.origin,
-        createdAt: f.createdAt,
-      })),
-      history: history.map((m) => ({ role: m.role, blocks: m.blocks })),
-      enabled: env.CLARIFICATION_ENABLED,
-    });
+    // §8.7: klarifikasi format dokumen tidak relevan saat user memilih
+    // mode media eksplisit; serahkan ke agent + system prompt.
+    const explicitMediaMode =
+      generation?.mode === "image" || generation?.mode === "video";
+    const question = explicitMediaMode
+      ? null
+      : detectClarification({
+          text,
+          attachmentIds,
+          files: files.map((f) => ({
+            _id: f._id,
+            name: f.name,
+            status: f.status,
+            origin: f.origin,
+            createdAt: f.createdAt,
+          })),
+          history: history.map((m) => ({ role: m.role, blocks: m.blocks })),
+          enabled: env.CLARIFICATION_ENABLED,
+        });
 
     if (question) {
       const doRetrievePre = shouldRetrieve({
@@ -391,7 +397,8 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
         llm: m.llm,
       })),
       currentUserText: augmentedText,
-      toolsAvailable: listToolNames(),
+      toolsAvailable: allowedToolNames,
+      generation: plan,
       files: files.map((f) => ({
         _id: f._id,
         name: f.name,
@@ -411,6 +418,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       fileCount: files.length,
       historyLen: history.length,
       hasRetrieval: retrieved.length > 0,
+      generation: plan,
     });
 
     logger.info(
@@ -423,7 +431,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     // ── Agent loop ──────────────────────────────────────────────────
     const result = await runAgent({
       messages,
-      tools: buildToolDefinitions(),
+      tools: buildToolDefinitions(plan.allowedMediaTools),
       userId,
       sessionId,
       messageId,
@@ -438,6 +446,8 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
           sseSend("tool.end", { callId, ok, summary }),
       },
       signal,
+      allowedTools: plan.allowedMediaTools,
+      generation: plan,
       askClarification: (q) => askClarification(q, "GENERATING"),
     });
 

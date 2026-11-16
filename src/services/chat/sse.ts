@@ -46,3 +46,30 @@ export function startPing(
   timer.unref?.();
   return timer;
 }
+
+export type MediaProgressStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export interface MediaProgressEvent {
+  jobId: string;
+  engine: "flux2" | "flux3" | "cosmos" | "python";
+  kind: "image" | "video";
+  status: MediaProgressStatus;
+  message?: string;
+}
+
+/**
+ * Emit event SSE `media.progress` (§14.2). Bukan block — progres media
+ * tampil sebagai indikator pada pesan yang sedang streaming. Dipanggil
+ * tool media selama menunggu job (heartbeat ≤15 dtk, §14.3).
+ */
+export function emitMediaProgress(
+  send: (event: string, data: unknown) => void,
+  payload: MediaProgressEvent,
+): void {
+  send("media.progress", payload);
+}

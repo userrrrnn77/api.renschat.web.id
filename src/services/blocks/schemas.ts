@@ -31,6 +31,22 @@ export const ImageBlock = z.object({
   type: z.literal("image"),
   fileId: z.string(),
   alt: z.string().optional(),
+  /** Field media generated (§14.2): diisi oleh generate_image, upload tidak. */
+  expiresAt: z.string().optional(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+});
+
+export const VideoBlock = z.object({
+  type: z.literal("video"),
+  fileId: z.string(),
+  engine: z.enum(["cosmos", "python"]),
+  aspect: z.enum(["16:9", "9:16"]),
+  durationSec: z.number().positive().optional(),
+  /** ISO timestamp kedaluwarsa media generated (§6.4). */
+  expiresAt: z.string().optional(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
 });
 
 export const TableBlock = z.object({
@@ -107,6 +123,7 @@ export const Block = z.discriminatedUnion("type", [
   CodeBlock,
   FileBlock,
   ImageBlock,
+  VideoBlock,
   TableBlock,
   ChartBlock,
   CardBlock,

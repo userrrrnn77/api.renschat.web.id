@@ -6,7 +6,19 @@ Dokumen ini adalah kontrak antara backend GenUI Chat dan harness frontend. Isi h
 
 `POST /api/sessions/:id/messages`
 
-Body: `{ "text": string, "attachmentIds"?: string[] }`
+Body:
+
+```json
+{
+  "text": string,
+  "attachmentIds"?: string[],
+  "generation"?: {
+    "mode": "auto" | "image" | "video",
+    "imageModel"?: "flux2-klein" | "flux3-klein",
+    "video"?: { "aspect": "16:9" | "9:16", "engine": "auto" | "cosmos" | "python" }
+  }
+}
+```
 
 Header respons:
 
@@ -55,6 +67,22 @@ export const ImageBlock = z.object({
   type: z.literal("image"),
   fileId: z.string(),
   alt: z.string().optional(),
+  /** Field media generated (§14.2): diisi oleh generate_image, upload tidak. */
+  expiresAt: z.string().optional(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+});
+
+export const VideoBlock = z.object({
+  type: z.literal("video"),
+  fileId: z.string(),
+  engine: z.enum(["cosmos", "python"]),
+  aspect: z.enum(["16:9", "9:16"]),
+  durationSec: z.number().positive().optional(),
+  /** ISO timestamp kedaluwarsa media generated (24 jam). */
+  expiresAt: z.string().optional(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
 });
 
 export const TableBlock = z.object({
@@ -101,12 +129,14 @@ export const CardBlock = z.object({
 
 export const ChoicesBlock = z.object({
   type: z.literal("choices"),
+  questionId: z.string().optional(),
   question: z.string(),
   multi: z.boolean().default(false),
   options: z
     .array(z.object({ label: z.string(), value: z.string().optional() }))
     .min(2)
     .max(6),
+  answer: z.array(z.string()).optional(),
 });
 
 export const Block = z.discriminatedUnion("type", [
@@ -114,6 +144,7 @@ export const Block = z.discriminatedUnion("type", [
   CodeBlock,
   FileBlock,
   ImageBlock,
+  VideoBlock,
   TableBlock,
   ChartBlock,
   CardBlock,
@@ -185,7 +216,19 @@ Model akan memanggil tool `name`. Dikirim sebelum `block.start` blok yang dihasi
 
 Tool selesai. `summary` adalah ringkasan singkat (bisa berupa pesan error jika `ok: false`). Blok yang dihasilkan tool dikirim **setelah** `tool.end` untuk atomik, **sebelum** `tool.end` untuk streaming — tapi karena semua tool menghasilkan blok atomik, urutan yang berlaku adalah `tool.start` → `block.start` → `block.end` → `tool.end`.
 
-### 3.7 `title`
+### 3.7 `media.progress`
+
+```json
+{ "jobId": string, "engine": "flux2" | "flux3" | "cosmos" | "python", "kind": "image" | "video", "status": "queued" | "running" | "succeeded" | "failed" | "cancelled", "message"?: string }
+```
+
+Dikirim oleh tool media selama menunggu job berjalan (image flux3 / video cosmos / video python). Berfungsi sebagai heartbeat agar koneksi SSE tidak idle-timeout — tool mengirim `status: "running"` ulang setiap ≤15 detik (implementasi: 10 detik). **Bukan block**: tidak punya `index`, tidak masuk array `blocks[]` pesan, tidak masuk history reload. Klien menampilkan indikator progres pada pesan yang sedang streaming.
+
+`status` mengikuti lifecycle GenerationJob: `queued` → `running` (bisa berulang) → `succeeded` | `failed` | `cancelled`. `message` opsional (bahasa Indonesia, mis. `"Masih membuat video..."`) untuk tooltip atau teks indikator. Klien tidak perlu re-render blok berdasarkan event ini.
+
+`jobId` bisa kosong (`""`) untuk event `queued` pertama sebelum GenerationJob tercipta; setelah job dibuat semua event memuat `jobId` yang valid. Bila FE butuh state akhir saat reload, gunakan `GET /api/jobs/:id` (§9).
+
+### 3.8 `title`
 
 ```json
 { "sessionId": string, "title": string }
@@ -193,7 +236,7 @@ Tool selesai. `summary` adalah ringkasan singkat (bisa berupa pesan error jika `
 
 Dikirim sekali di giliran pertama (saat judul sesi dibuat otomatis). Bisa muncul kapan saja sebelum `message.end`. Klien dianjurkan men-update header sesi tanpa menunggu `message.end`.
 
-### 3.8 `message.end`
+### 3.9 `message.end`
 
 ```json
 { "messageId": string, "status": "done" | "aborted" | "error", "usage": Usage | null }
@@ -207,13 +250,13 @@ Event penutup. `status`:
 
 `usage` adalah objek `{ prompt_tokens?, completion_tokens?, total_tokens? }` dari upstream, atau `null` bila tidak tersedia.
 
-### 3.9 `error`
+### 3.10 `error`
 
 ```json
 { "code": string, "message": string }
 ```
 
-Dikirim sebelum `message.end` bila ada error setelah streaming dimulai. `code` yang umum: `STREAM_ERROR` (error dari upstream), atau `code` dari `AppError` (`BAD_REQUEST`, `NOT_FOUND`, dll.) bila error terjadi di server.
+Dikirim sebelum `message.end` bila ada error setelah streaming dimulai. `code` yang umum: `STREAM_ERROR` (error dari upstream), atau `code` dari `AppError` (`BAD_REQUEST`, `NOT_FOUND`, dll.) bila error terjadi di server. Kode media yang bisa muncul di sini: lihat §9.2.
 
 ## 4. Urutan `index`
 
@@ -223,7 +266,7 @@ Satu-satunya event di luar urutan ini adalah `message.start`, `title`, `message.
 
 ## 5. Block atomik
 
-Block tipe `file`, `image`, `table`, `chart`, `card`, `choices` dikirim **atomik**:
+Block tipe `file`, `image`, `video`, `table`, `chart`, `card`, `choices` dikirim **atomik**:
 
 ```
 block.start  → block.end   (tanpa block.delta di antaranya)
@@ -510,3 +553,113 @@ Hanya untuk konteks harness; bukan bagian streaming:
   - `disabled` (`EMBEDDING_ENABLED=false`), `pending` (menunggu), `indexing` (berjalan), `ready` (selesai), `failed` (gagal), `null` (dokumen lama tanpa field).
 - File dengan `status: "ready"` **sudah dapat** dibaca / di-text-search, meskipun `indexStatus` masih `pending`/`indexing`.
 - File dengan `indexStatus: "failed"` tetap dapat dibaca & ditemukan via `search_attachment` mode `text`; hanya jalur semantic yang terpengaruh.
+
+### 9.2 Kode error media (muncul di event error / tool.end / HTTP)
+
+| Kode | HTTP | Arti |
+|---|---|---|
+| `INVALID_PARAMS` | 400 | Parameter salah (termasuk `generation` tak dikenal) |
+| `ENTITLEMENT_REQUIRED` | 403 | Model terkunci (butuh donasi) |
+| `INSUFFICIENT_CREDITS` | 402 | Kredit habis |
+| `RATE_LIMITED` | 429 | Limit harian / provider |
+| `GENERATION_BUSY` | 409 | Sudah ada job generate aktif |
+| `ASSET_EXPIRED` | 410 | Media sudah dihapus (24 jam) |
+| `PROVIDER_REFUSED` | 422 | Ditolak safety/validasi provider |
+| `PROVIDER_ERROR` | 502 | Provider error / response tak dikenali |
+| `JOB_TIMEOUT` | 504 | Melewati batas waktu |
+| `MEDIA_DISABLED` | 503 | Kill switch aktif / budget harian habis |
+| `TOOL_NOT_ALLOWED` | – | Hasil tool (bukan HTTP) bila tool media di luar allowlist turn |
+
+## 10. Kontrak tool media (model-internal)
+
+Tool media dipanggil oleh model lewat mekanisme tool-calling; klien tidak memanggilnya langsung. Kontrak args dan hasil di bawah ini didokumentasikan agar harness bisa memverifikasi output tool media. Semua tool media hanya diekspos saat server mengizinkannya pada turn ini (`plan.allowedMediaTools`). Tool call di luar allowlist ditolak dengan `errorResult("TOOL_NOT_ALLOWED")` tanpa dieksekusi (§8.5), termasuk yang dicoba lewat prompt-injection.
+
+Model argumen **tidak** menentukan model/engine/kredit; semua diputus server per request.
+
+### 10.1 `generate_image`
+
+Args:
+
+```json
+{ "prompt": string (1..2000), "aspect_ratio"?: "1:1" | "16:9" | "9:16" }
+```
+
+Model (flux2/flux3) dari `plan.imageModel`. Non-donatur yang memilih flux3 eksplisit ditolak `ENTITLEMENT_REQUIRED`; kredit habis → `INSUFFICIENT_CREDITS`. Tidak ada pilihan → `flux2` (mode auto tidak pernah `flux3` diam-diam). Hasil sukses (≤2 KB):
+
+```json
+{
+  "ok": true,
+  "fileId": "<ObjectId>",
+  "kind": "image",
+  "model": "flux2-klein" | "flux3-klein",
+  "aspect": "1:1" | "16:9" | "9:16",
+  "width": number,
+  "height": number,
+  "expiresAt": "<ISO 8601>"
+}
+```
+
+Blok `ImageBlock` di-emit ke FE setelah media tersimpan di R2 + FileDoc. Emit SSE: `tool.start` → `block.start/end image` → `tool.end` → `block.start/end text` (opsional, narasi model).
+
+### 10.2 `generate_video_cosmos`
+
+Args:
+
+```json
+{ "prompt": string (1..1500), "aspect_ratio"?: "16:9" | "9:16" }
+```
+
+Hanya diekspos saat `plan.videoEngine === "cosmos"` (donatur dengan kredit video). Hasil sukses (≤2 KB):
+
+```json
+{
+  "ok": true,
+  "fileId": "<ObjectId>",
+  "jobId": "<ObjectId>",
+  "kind": "video",
+  "engine": "cosmos",
+  "aspect": "16:9" | "9:16",
+  "durationSec": number,
+  "expiresAt": "<ISO 8601>"
+}
+```
+
+Selama menunggu, tool emit `media.progress` (`queued` → `running` heartbeat tiap 10 dtk → `succeeded`/`failed`/`cancelled`). Setelah sukses, blok `VideoBlock` di-emit ke FE. Kredit dikonsumsi atomik saat job dibuat; semua error setelah konsumsi (provider 422/429/5xx, timeout, abort klien) di-refund idempotent (§7.8). Tidak ada resubmit otomatis (§14.3); client timeout tidak memicu retry.
+
+### 10.3 `generate_video_python`
+
+Args:
+
+```json
+{
+  "script": string (python, ≤20KB),
+  "aspect_ratio"?: "16:9" | "9:16",
+  "duration_seconds"?: number (2..10),
+  "fps"?: number (12..30),
+  "title"?: string
+}
+```
+
+Hanya diekspos saat `plan.videoEngine === "python"` (jalur gratis, atau donatur tanpa kredit cosmos). Model menulis script Python yang menghasilkan frame PNG; backend menjahit MP4 via ffmpeg fixed. Tidak memakai kredit. Hasil sukses (≤2 KB):
+
+```json
+{
+  "ok": true,
+  "fileId": "<ObjectId>",
+  "jobId": "<ObjectId>",
+  "kind": "video",
+  "engine": "python",
+  "aspect": "16:9" | "9:16",
+  "durationSec": number,
+  "expiresAt": "<ISO 8601>",
+  "warning"?: string
+}
+```
+
+`warning` muncul bila ≥90% tapi <100% frame berhasil (stitch parsial, §13.5). Hasil gagal-yang-bisa-diperbaiki (§13.6) — model diharapkan memperbaiki script dan memanggil ulang, maks 3 percobaan per pesan user; percobaan ke-4 → `errorResult("PROVIDER_ERROR", …)` dengan pesan ramah:
+
+```json
+{ "ok": false, "stage": "frames" | "sandbox" | "size" | "validate" | "timeout", "stderrTail": string (≤2000 char) }
+```
+
+`stderrTail` mentah dari sandbox, sudah dipotong agar total payload ≤2 KB (hasil tool dipotong sistem). Setelah sukses, blok `VideoBlock` di-emit ke FE. `UsageCounter(video_python)` dan `GlobalUsageCounter(python)` bertambah hanya saat sukses (§13.6). Abort klien → job cancelled, sandbox kill, workdir dibersihkan (§14.3).

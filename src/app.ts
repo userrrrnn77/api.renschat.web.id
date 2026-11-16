@@ -13,6 +13,8 @@ import { env } from "./config/env.js";
 import { logger } from "./config/logger.js";
 import { AppError } from "./middleware/error.js";
 import indexRoutes from "./routes/index.js";
+import { internalRouter } from "./routes/internal.js";
+import { kofiWebhookRouter } from "./routes/kofiWebhook.js";
 import path from "node:path";
 
 export function buildApp(): express.Express {
@@ -37,6 +39,16 @@ export function buildApp(): express.Express {
   app.use(pinoHttp({ logger }));
 
   app.use(express.static(path.join(process.cwd(), "public")));
+
+  // Route internal (cron) di luar /api: tanpa requireAuth, tanpa
+  // globalLimiter; auth-nya lewat CRON_SECRET di controller.
+  app.use("/internal", internalRouter);
+
+  // Ko-fi webhook (§7.1): dipasang SEBELUM /api supaya tidak melewati
+  // requireAuth maupun globalLimiter milik indexRoutes. Hanya route ini
+  // yang memakai express.urlencoded; parser JSON global tidak diubah
+  // (content-type urlencoded tidak disentuh oleh express.json).
+  app.use("/api/webhooks", kofiWebhookRouter);
 
   app.use("/api", indexRoutes);
 

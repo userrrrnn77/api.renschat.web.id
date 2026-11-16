@@ -105,6 +105,16 @@ function basicMimeCheck(name: string, mime: string): void {
   }
 }
 
+/** Media generated yang sudah lewat expiresAt atau sudah di-flush (§6.4). */
+function assertNotExpired(doc: { expired?: boolean; expiresAt?: Date }): void {
+  if (doc.expired === true) {
+    throw new AppError("ASSET_EXPIRED", 410, "Media sudah kedaluwarsa");
+  }
+  if (doc.expiresAt !== undefined && doc.expiresAt.getTime() <= Date.now()) {
+    throw new AppError("ASSET_EXPIRED", 410, "Media sudah kedaluwarsa");
+  }
+}
+
 const PresignBody = z.object({
   sessionId: z.string().refine((v) => Types.ObjectId.isValid(v), {
     message: "Invalid sessionId",
@@ -316,6 +326,7 @@ export async function downloadFile(req: Request, res: Response): Promise<void> {
     userId: getUserId(res),
   }).lean();
   if (!doc) throw AppError.notFound();
+  assertNotExpired(doc);
   if (doc.status === "pending") {
     throw new AppError("UPLOAD_INCOMPLETE", 425, "File not uploaded yet");
   }
@@ -347,6 +358,38 @@ export async function downloadFile(req: Request, res: Response): Promise<void> {
     logger.error({ err, fileId: doc._id.toString() }, "download stream error");
     if (!res.writableEnded) res.end();
   }
+}
+
+/**
+ * Presigned URL GET untuk <img>/<video> FE (§7.4). Alasan bukan /download:
+ * cookie lintas origin bermasalah dan seek video butuh range request.
+ * Kepemilikan dicek; key R2 tidak pernah dikirim ke FE.
+ */
+export async function getFileUrl(req: Request, res: Response): Promise<void> {
+  const id = parseFileId(req.params.id);
+  const doc = await FileDocModel.findOne({
+    _id: id,
+    userId: getUserId(res),
+  }).lean();
+  if (!doc) throw AppError.notFound();
+  assertNotExpired(doc);
+  if (doc.status === "pending") {
+    throw new AppError("UPLOAD_INCOMPLETE", 425, "File not uploaded yet");
+  }
+
+  const storage = getStorage();
+  const url = await storage.presignGet(doc.storage.key, {
+    expiresInSec: env.ASSET_URL_TTL_SECONDS,
+  });
+
+  res.json({
+    url,
+    mime: doc.mime,
+    expiresAt: doc.expiresAt !== undefined ? doc.expiresAt.toISOString() : null,
+    width: doc.mediaMeta?.width ?? null,
+    height: doc.mediaMeta?.height ?? null,
+    durationSec: doc.mediaMeta?.durationSec ?? null,
+  });
 }
 
 export async function getFileContent(

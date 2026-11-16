@@ -10,12 +10,25 @@ import "./files.js";
 import "./pdf.js";
 import "./attachments.js";
 import "./terminal.js";
+import "./generateImage.js";
+import "./generateVideoCosmos.js";
+import "./generateVideoPython.js";
 
 export { getTool, listTools, listToolNames } from "./registry.js";
 export type { ToolContext, ToolResult, ToolDef } from "./registry.js";
 
-export function buildToolDefinitions(): ToolDefinition[] {
+/**
+ * Bila `allowed` diberikan, hanya tool dalam set yang ikut (tool non-media
+ * selalu lolos). Menyembunyikan tool dari daftar saja tidak cukup —
+ * agentLoop tetap memvalidasi lewat allowlist (§8.5).
+ */
+export function buildToolDefinitions(
+  allowed?: ReadonlySet<string>,
+): ToolDefinition[] {
   return listTools()
+    .filter(
+      (t) => allowed === undefined || t.kind !== "media" || allowed.has(t.name),
+    )
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((t) => ({
       type: "function",

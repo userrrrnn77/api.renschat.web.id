@@ -23,6 +23,7 @@ import {
   type ToolResult,
   type ToolDef,
 } from "../tools/registry.js";
+import type { GenerationPlan } from "../generation/plan.js";
 import { getProvider, type ReasoningEffort } from "../llm/provider.js";
 import { createThinkingForwarder } from "./thinkingStream.js";
 
@@ -44,6 +45,10 @@ export interface AgentInput {
   sseSend: (event: string, data: unknown) => void;
   callbacks: AgentCallbacks;
   signal: AbortSignal;
+  /** Allowlist tool media untuk turn ini (tool non-media selalu boleh, §8.5). */
+  allowedTools: ReadonlySet<string>;
+  /** Plan generation turn ini; diteruskan ke ToolContext. */
+  generation: GenerationPlan;
   askClarification?: (q: ClarificationQuestion) => Promise<string[]>;
 }
 
@@ -257,7 +262,17 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
       let toolResult: ToolResult;
 
       try {
-        if (!tool) {
+        if (
+          tool &&
+          tool.kind === "media" &&
+          !input.allowedTools.has(tool.name)
+        ) {
+          // §8.5: tool media di luar allowlist turn ini tidak dijalankan.
+          toolResult = errorResult(
+            "TOOL_NOT_ALLOWED",
+            `Tool ${tool.name} is not allowed for this request`,
+          );
+        } else if (!tool) {
           toolResult = errorResult(
             "TOOL_NOT_FOUND",
             `Tool ${call.name} does not exist`,
@@ -272,6 +287,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             emit: input.sseSend,
             emitBlock: (b) => emitter.emitAtomic(b),
             iteration: iter,
+            generation: input.generation,
             askClarification: input.askClarification,
           });
         }

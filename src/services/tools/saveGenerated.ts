@@ -1,12 +1,17 @@
 // src/services/tools/saveGenerated.ts
 import { Types } from "mongoose";
-import { FileDocModel, type FileIndexStatus } from "../../models/FileDoc.js";
+import {
+  FileDocModel,
+  type FileIndexStatus,
+  type FileMediaKind,
+} from "../../models/FileDoc.js";
 import { ChunkModel } from "../../models/Chunk.js";
 import { getStorage, pickPrefix } from "../../storage/index.js";
 import { chunkText } from "../ingest/chunker.js";
 import { embedAndStoreChunks } from "../ingest/embedder.js";
 import { env } from "../../config/env.js";
 import { logger } from "../../config/logger.js";
+import { AppError } from "../../middleware/error.js";
 
 const CODE_EXTS = new Set([
   "ts",
@@ -207,5 +212,139 @@ export async function saveGenerated(
     mime: doc.mime,
     size: doc.size,
     version: doc.version,
+  };
+}
+
+// ── Media generated (image / video) — §10.1 ─────────────────────────────
+
+/** Content-Type dari magic bytes untuk gambar (JPEG/PNG/WebP). */
+export function detectImageMime(buf: Buffer): string | null {
+  if (buf.length < 12) return null;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47
+  ) {
+    return "image/png";
+  }
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return "image/jpeg";
+  }
+  // WebP: "RIFF" .... "WEBP"
+  if (
+    buf[0] === 0x52 &&
+    buf[1] === 0x49 &&
+    buf[2] === 0x46 &&
+    buf[3] === 0x46 &&
+    buf[8] === 0x57 &&
+    buf[9] === 0x45 &&
+    buf[10] === 0x42 &&
+    buf[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+  return null;
+}
+
+export interface SaveGeneratedMediaInput {
+  userId: Types.ObjectId;
+  sessionId: Types.ObjectId;
+  name: string;
+  kind: FileMediaKind;
+  /** Untuk kind "image", mime diambil dari magic bytes (bukan dipegang client). */
+  width?: number;
+  height?: number;
+  durationSec?: number;
+  aspect: string;
+  engine: string;
+  model: string;
+  buf: Buffer;
+}
+
+export interface SavedGeneratedMedia {
+  fileId: string;
+  name: string;
+  mime: string;
+  size: number;
+  width?: number;
+  height?: number;
+  durationSec?: number;
+  aspect: string;
+  engine: string;
+  expiresAt: Date;
+}
+
+/**
+ * Simpan media hasil generate: upload R2 → FileDoc origin="generated"
+ * dengan `kind`, `mediaMeta`, dan `expiresAt = now + ASSET_TTL_HOURS`.
+ * Tidak chunk / tidak index / tidak masuk RAG (§6.4 efek samping 2).
+ */
+export async function saveGeneratedMedia(
+  input: SaveGeneratedMediaInput,
+): Promise<SavedGeneratedMedia> {
+  let mime: string;
+  if (input.kind === "image") {
+    const detected = detectImageMime(input.buf);
+    if (!detected) {
+      throw new AppError(
+        "PROVIDER_ERROR",
+        502,
+        "Provider returned an unrecognized image format",
+      );
+    }
+    mime = detected;
+  } else {
+    mime = "video/mp4";
+  }
+
+  const storage = getStorage();
+  const prefix = pickPrefix(mime);
+  const ref = await storage.put(input.buf, { mime, name: input.name }, prefix);
+
+  const expiresAt = new Date(Date.now() + env.ASSET_TTL_HOURS * 3600_000);
+
+  const doc = await FileDocModel.create({
+    userId: input.userId,
+    sessionId: input.sessionId,
+    origin: "generated",
+    name: input.name,
+    mime,
+    size: input.buf.length,
+    sha256: sha256Hex(input.buf),
+    version: 1,
+    parentFileId: null,
+    storage: ref,
+    status: "ready",
+    indexStatus: "disabled",
+    kind: input.kind,
+    mediaMeta: {
+      model: input.model,
+      aspect: input.aspect,
+      engine: input.engine,
+      ...(input.width !== undefined ? { width: input.width } : {}),
+      ...(input.height !== undefined ? { height: input.height } : {}),
+      ...(input.durationSec !== undefined
+        ? { durationSec: input.durationSec }
+        : {}),
+    },
+    expiresAt,
+  });
+
+  return {
+    fileId: doc._id.toString(),
+    name: doc.name,
+    mime: doc.mime,
+    size: doc.size,
+    ...(input.width !== undefined ? { width: input.width } : {}),
+    ...(input.height !== undefined ? { height: input.height } : {}),
+    ...(input.durationSec !== undefined
+      ? { durationSec: input.durationSec }
+      : {}),
+    aspect: input.aspect,
+    engine: input.engine,
+    expiresAt,
   };
 }

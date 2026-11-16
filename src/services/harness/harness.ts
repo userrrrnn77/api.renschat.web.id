@@ -1,5 +1,6 @@
 // src/services/harness/harness.ts
 import { env } from "../../config/env.js";
+import type { GenerationPlan } from "../generation/plan.js";
 import type { ReasoningEffort } from "../llm/provider.js";
 
 export interface HarnessDecision {
@@ -15,10 +16,26 @@ export interface HarnessInput {
   fileCount: number;
   historyLen: number;
   hasRetrieval: boolean;
+  /** Plan generation turn ini; mode eksplisit selalu pakai MODEL_MAIN (§8.6). */
+  generation?: GenerationPlan;
 }
 
 const HEAVY_VERBS =
   /analisis|bandingkan|debug|rancang|arsitektur|buktikan|optimasi|strategi|step by step|kenapa error/i;
+
+// §8.6: pesan yang menuntut media tidak boleh jatuh ke MODEL_FAST
+// (model fast lemah di tool calling).
+const MEDIA_KEYWORDS =
+  /gambar|foto|ilustrasi|image|video|animasi|klip|generate|buatkan/i;
+
+const PY_VIDEO_EXTRA_TOKENS = 8_000;
+
+function maxTokensWithMediaBudget(base: number, input: HarnessInput): number {
+  if (input.generation?.allowedMediaTools.has("generate_video_python")) {
+    return base + PY_VIDEO_EXTRA_TOKENS;
+  }
+  return base;
+}
 
 export function classifyTurn(input: HarnessInput): HarnessDecision {
   if (!env.HARNESS_ENABLED) {
@@ -26,7 +43,21 @@ export function classifyTurn(input: HarnessInput): HarnessDecision {
       complexity: "standard",
       model: env.MODEL_MAIN,
       reasoning: env.REASONING_DEFAULT,
-      maxTokens: env.MAX_OUTPUT_TOKENS,
+      maxTokens: maxTokensWithMediaBudget(env.MAX_OUTPUT_TOKENS, input),
+    };
+  }
+
+  // §8.6: mode generation eksplisit ATAU kata kunci media → paksa MODEL_MAIN.
+  const isMediaRequest =
+    (input.generation !== undefined && input.generation.mode !== "auto") ||
+    MEDIA_KEYWORDS.test(input.text);
+
+  if (isMediaRequest) {
+    return {
+      complexity: "standard",
+      model: env.MODEL_MAIN,
+      reasoning: env.REASONING_DEFAULT,
+      maxTokens: maxTokensWithMediaBudget(env.MAX_OUTPUT_TOKENS, input),
     };
   }
 
@@ -42,7 +73,7 @@ export function classifyTurn(input: HarnessInput): HarnessDecision {
       complexity: "simple",
       model: env.HARNESS_ROUTE_FAST ? env.MODEL_FAST : env.MODEL_MAIN,
       reasoning: "off",
-      maxTokens: env.MAX_OUTPUT_TOKENS,
+      maxTokens: maxTokensWithMediaBudget(env.MAX_OUTPUT_TOKENS, input),
     };
   }
 
@@ -64,7 +95,10 @@ export function classifyTurn(input: HarnessInput): HarnessDecision {
       complexity: "complex",
       model: env.MODEL_MAIN,
       reasoning: "high",
-      maxTokens: env.MAX_OUTPUT_TOKENS + budget,
+      maxTokens: maxTokensWithMediaBudget(
+        env.MAX_OUTPUT_TOKENS + budget,
+        input,
+      ),
     };
   }
 
@@ -72,6 +106,6 @@ export function classifyTurn(input: HarnessInput): HarnessDecision {
     complexity: "standard",
     model: env.MODEL_MAIN,
     reasoning: env.REASONING_DEFAULT,
-    maxTokens: env.MAX_OUTPUT_TOKENS,
+    maxTokens: maxTokensWithMediaBudget(env.MAX_OUTPUT_TOKENS, input),
   };
 }

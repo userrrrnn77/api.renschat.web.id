@@ -10,6 +10,8 @@ export type FileIndexStatus =
   | "ready"
   | "failed";
 export type StorageDriver = "r2" | "local" | "cloudinary";
+/** Jenis media generated (§6.4). Undefined untuk file biasa. */
+export type FileMediaKind = "image" | "video";
 
 export interface IFileDocStorage {
   driver: StorageDriver;
@@ -31,6 +33,17 @@ export interface IFileDocDigest {
   json?: unknown;
 }
 
+export interface IFileDocMediaMeta {
+  model: string;
+  width?: number;
+  height?: number;
+  durationSec?: number;
+  /** "1:1" | "16:9" | "9:16" untuk gambar; "16:9" | "9:16" untuk video. */
+  aspect: string;
+  /** flux2 | flux3 | cosmos | python */
+  engine: string;
+}
+
 export interface IFileDoc {
   userId: Types.ObjectId;
   sessionId: Types.ObjectId;
@@ -48,6 +61,16 @@ export interface IFileDoc {
   extract?: IFileDocExtract;
   digest?: IFileDocDigest;
   summaryLine?: string;
+  /** Media generated saja: "image" | "video". */
+  kind?: FileMediaKind;
+  /** Media generated saja: metadata teknis (tanpa prompt). */
+  mediaMeta?: IFileDocMediaMeta;
+  /** Media generated saja: createdAt + ASSET_TTL_HOURS (§6.4). */
+  expiresAt?: Date;
+  /** Media generated saja: true setelah object R2 dihapus oleh flush. */
+  expired?: boolean;
+  /** Media generated saja: TTL metadata 7 hari setelah expired (§10.2). */
+  purgeAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -86,6 +109,18 @@ const digestSchema = new Schema<IFileDocDigest>(
   { _id: false },
 );
 
+const mediaMetaSchema = new Schema<IFileDocMediaMeta>(
+  {
+    model: { type: String, required: true },
+    width: { type: Number, default: undefined },
+    height: { type: Number, default: undefined },
+    durationSec: { type: Number, default: undefined },
+    aspect: { type: String, required: true },
+    engine: { type: String, required: true },
+  },
+  { _id: false },
+);
+
 const fileDocSchema = new Schema<IFileDoc>(
   {
     userId: { type: Types.ObjectId, ref: "User", required: true },
@@ -112,12 +147,26 @@ const fileDocSchema = new Schema<IFileDoc>(
     extract: { type: extractSchema, default: undefined },
     digest: { type: digestSchema, default: undefined },
     summaryLine: String,
+    kind: {
+      type: String,
+      enum: ["image", "video"],
+      default: undefined,
+    },
+    mediaMeta: { type: mediaMetaSchema, default: undefined },
+    expiresAt: { type: Date, default: undefined },
+    expired: { type: Boolean, default: undefined },
+    purgeAt: { type: Date, default: undefined },
   },
   { timestamps: true },
 );
 
 fileDocSchema.index({ sessionId: 1, createdAt: 1 });
 fileDocSchema.index({ status: 1, createdAt: 1 });
+// Flush media expired (§7.6) — batch query utama.
+fileDocSchema.index({ expiresAt: 1, status: 1 });
+// TTL metadata media: hapus dokumen 7 hari setelah purgeAt (§10.2 lapis 3).
+// Dokumen tanpa purgeAt (semua file non-media) tidak pernah dihapus TTL.
+fileDocSchema.index({ purgeAt: 1 }, { expireAfterSeconds: 0 });
 
 export const FileDocModel: Model<IFileDoc> =
   (mongoose.models.FileDoc as Model<IFileDoc>) ??

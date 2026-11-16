@@ -10,10 +10,14 @@ import { SessionModel } from "../../models/Session.js";
 import { getStorage } from "../../storage/index.js";
 import { logger } from "../../config/logger.js";
 
-const INTERVAL_MS = 30 * 60_000;
+const INTERVAL_MS = 15 * 60_000;
 const TMP_MAX_AGE_MS = 60 * 60_000;
 const STALE_FILE_MS = 60 * 60_000;
 const ORPHAN_UPLOAD_BATCH = 500;
+// ── Media flush (§7.6) ──
+const MEDIA_FLUSH_BATCH = 200;
+/** Metadata media dibersihkan 7 hari setelah expired (§10.2 lapis 3). */
+const MEDIA_PURGE_AFTER_MS = 7 * 24 * 60 * 60_000;
 
 let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -166,6 +170,82 @@ async function cleanOrphans(): Promise<void> {
   }
 }
 
+// ── Media flush 24 jam (§7.6 / §10.2) ───────────────────────────────────
+
+export interface FlushResult {
+  deleted: number;
+  failed: number;
+}
+
+/**
+ * Hapus object R2 untuk FileDoc media generated yang `expiresAt <= now`
+ * (batch 200), lalu tandai `expired: true` + `purgeAt = now + 7 hari`.
+ * Dokumen tidak boleh hilang sebelum object R2 terhapus: kalau delete R2
+ * gagal, dokumen dibiarkan `expired` false supaya dicoba lagi di run
+ * berikutnya.
+ *
+ * Publik untuk POST /internal/cron/flush-assets (§7.6).
+ */
+export async function flushExpiredMedia(): Promise<FlushResult> {
+  const now = new Date();
+  const storage = getStorage();
+  let deleted = 0;
+  let failed = 0;
+
+  const expired = (await FileDocModel.find({
+    origin: "generated",
+    expired: { $ne: true },
+    expiresAt: { $ne: null, $lte: now },
+  })
+    .select({ _id: 1, storage: 1 })
+    .limit(MEDIA_FLUSH_BATCH)
+    .lean()) as unknown as StorageRef[];
+
+  for (const doc of expired) {
+    try {
+      await storage.delete(doc.storage.key);
+      await FileDocModel.updateOne(
+        { _id: doc._id },
+        {
+          $set: {
+            expired: true,
+            purgeAt: new Date(Date.now() + MEDIA_PURGE_AFTER_MS),
+          },
+        },
+      );
+      deleted++;
+    } catch (err) {
+      failed++;
+      logger.warn(
+        { err, fileId: String(doc._id) },
+        "flush expired media failed",
+      );
+    }
+  }
+
+  // Lapis 3 (§10.2): metadata media boleh dibersihkan 7 hari setelah
+  // expired. TTL index pada purgeAt juga menghapus; deleteMany eksplisit
+  // memberi jumlah yang teramati. File non-media tidak punya purgeAt →
+  // tidak pernah terkena.
+  const purgeDel = await FileDocModel.deleteMany({
+    origin: "generated",
+    purgeAt: { $ne: null, $lte: now },
+  });
+
+  if (deleted > 0 || failed > 0 || (purgeDel.deletedCount ?? 0) > 0) {
+    logger.info(
+      {
+        deleted,
+        failed,
+        purged: purgeDel.deletedCount ?? 0,
+      },
+      "cleanup: media flush done",
+    );
+  }
+
+  return { deleted, failed };
+}
+
 async function runOnce(): Promise<void> {
   try {
     await cleanTmp();
@@ -186,6 +266,11 @@ async function runOnce(): Promise<void> {
     await cleanOrphans();
   } catch (err) {
     logger.warn({ err }, "cleanOrphans failed");
+  }
+  try {
+    await flushExpiredMedia();
+  } catch (err) {
+    logger.warn({ err }, "flushExpiredMedia failed");
   }
 }
 

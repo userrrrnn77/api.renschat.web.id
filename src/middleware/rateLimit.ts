@@ -65,3 +65,17 @@ export const filesLimiter = rateLimit({
   keyGenerator: userOrIpKey,
   message: { error: { code: "RATE_LIMIT", message: "Too many file requests" } },
 });
+
+// §7.3: klaim donasi dibatasi 5/jam/user di production.
+export const claimDonationLimiter = rateLimit({
+  ...createRateLimitOptions("claim-donation"),
+  windowMs: 60 * 60_000,
+  limit: isDev ? 20 : 5,
+  keyGenerator: userOrIpKey,
+  message: {
+    error: {
+      code: "RATE_LIMIT",
+      message: "Terlalu banyak percobaan klaim. Coba lagi nanti.",
+    },
+  },
+});

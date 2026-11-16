@@ -8,6 +8,7 @@ import type {
   PutMeta,
   StoragePrefix,
   PresignPutOptions,
+  PresignGetOptions,
   PresignedPut,
   StorageHeadResult,
 } from "./index.js";
@@ -52,6 +53,13 @@ export const r2Storage: StorageProvider = {
       url,
       expiresAt: Math.floor(Date.now() / 1000) + opts.expiresInSec,
     };
+  },
+
+  async presignGet(key: string, opts: PresignGetOptions): Promise<string> {
+    return client.presign(key, {
+      method: "GET",
+      expiresIn: opts.expiresInSec,
+    });
   },
 
   async head(key: string): Promise<StorageHeadResult | null> {

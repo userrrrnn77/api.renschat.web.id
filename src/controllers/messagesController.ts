@@ -14,6 +14,7 @@ import {
   startPing,
 } from "../services/chat/sse.js";
 import { estimateTokens } from "../services/chat/contextBuilder.js";
+import { GenerationInputSchema } from "@services/generation/plan.js";
 import { logger } from "../config/logger.js";
 import {
   registerStream,
@@ -32,6 +33,7 @@ import { Block } from "@services/blocks/schemas.js";
 const PostMessageBody = z.object({
   text: z.string().min(1).max(100_000),
   attachmentIds: z.array(z.string()).optional(),
+  generation: GenerationInputSchema.optional(),
 });
 
 const RespondBody = z.object({
@@ -45,7 +47,14 @@ type FinalStatus = "done" | "aborted" | "error";
 
 export async function postMessage(req: Request, res: Response): Promise<void> {
   const sessionId = parseSessionId(req.params.id);
-  const body = PostMessageBody.parse(req.body);
+  // §7.8: nilai generation tak dikenal → 400 INVALID_PARAMS (bukan ZodError mentah).
+  const parsedBody = PostMessageBody.safeParse(req.body);
+  if (!parsedBody.success) {
+    throw AppError.invalidParams("Body tidak valid", {
+      issues: z.treeifyError(parsedBody.error),
+    });
+  }
+  const body = parsedBody.data;
   const userId = getUserId(res);
 
   const session = await SessionModel.findOne({ _id: sessionId, userId }).lean();
@@ -138,6 +147,9 @@ export async function postMessage(req: Request, res: Response): Promise<void> {
         userMessageId: userMsg._id,
         text: body.text,
         attachmentIds,
+        ...(body.generation !== undefined
+          ? { generation: body.generation }
+          : {}),
         sseSend: sse.send,
         signal: ac.signal,
       });
