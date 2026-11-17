@@ -11,6 +11,12 @@ const REQUIRED = [
 ] as const;
 
 const RECOMMENDED = ["KOFI_VERIFICATION_TOKEN", "KOFI_PAGE_URL"] as const;
+const OAUTH = [
+  "GOOGLE_CLIENT_ID",
+  "GOOGLE_CLIENT_SECRET",
+  "GOOGLE_REDIRECT_URI",
+  "GOOGLE_POST_LOGIN_REDIRECT",
+] as const;
 
 const OPTIONAL = [
   "NODE_ENV",
@@ -103,6 +109,7 @@ function section(title: string, keys: readonly string[]): number {
 
 const reqMissing = section("REQUIRED (tanpa default)", REQUIRED);
 section("RECOMMENDED (Fase 3)", RECOMMENDED);
+section("OAUTH (Wajib jika GOOGLE_AUTH_ENABLED=true)", OAUTH);
 section("OPTIONAL (punya default)", OPTIONAL);
 
 console.log(

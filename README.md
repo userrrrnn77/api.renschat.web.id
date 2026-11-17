@@ -1,4 +1,4 @@
-# GenUI Chat Backend
+# RensChat Backend
 
 Backend chat AI generative UI — Bun + Express 5 + Mongoose + TypeScript, dengan kemampuan generate gambar (`flux.2-klein-4b` gratis, `flux.3-image-klein` untuk donatur) dan video (`nvidia/cosmos3-nano` untuk donatur, jalur gratis via Python + ffmpeg). Donasi Ko-fi bersifat **opsional**; semua fitur inti tetap gratis.
 

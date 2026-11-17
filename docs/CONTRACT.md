@@ -1,6 +1,6 @@
 # Kontrak Generative UI — Backend ↔ Frontend
 
-Dokumen ini adalah kontrak antara backend GenUI Chat dan harness frontend. Isi hanya fakta kontrak: bentuk data, urutan event, dan perilaku error. Contoh stream diambil apa adanya dari rekaman `scripts/recordSse.ts`.
+Dokumen ini adalah kontrak antara backend RensChat dan harness frontend. Isi hanya fakta kontrak: bentuk data, urutan event, dan perilaku error. Contoh stream diambil apa adanya dari rekaman `scripts/recordSse.ts`.
 
 ## 1. Endpoint streaming
 
@@ -554,7 +554,7 @@ Hanya untuk konteks harness; bukan bagian streaming:
 - File dengan `status: "ready"` **sudah dapat** dibaca / di-text-search, meskipun `indexStatus` masih `pending`/`indexing`.
 - File dengan `indexStatus: "failed"` tetap dapat dibaca & ditemukan via `search_attachment` mode `text`; hanya jalur semantic yang terpengaruh.
 
-### 9.2 Kode error media (muncul di event error / tool.end / HTTP)
+### 9.2 Kode error media & web scrape (muncul di event error / tool.end / HTTP)
 
 | Kode | HTTP | Arti |
 |---|---|---|
@@ -569,6 +569,10 @@ Hanya untuk konteks harness; bukan bagian streaming:
 | `JOB_TIMEOUT` | 504 | Melewati batas waktu |
 | `MEDIA_DISABLED` | 503 | Kill switch aktif / budget harian habis |
 | `TOOL_NOT_ALLOWED` | – | Hasil tool (bukan HTTP) bila tool media di luar allowlist turn |
+| `CONTENT_BLOCKED` | – | Web scrape ditolak karena terindikasi judi/finansial terlarang |
+| `SSRF_BLOCKED` | – | Web scrape ditolak karena URL mengarah ke IP privat/internal |
+| `FETCH_FAILED` | – | Gagal mengambil konten web (timeout/DNS/size limit) |
+| `UNSUPPORTED_CONTENT_TYPE` | – | Tipe konten bukan HTML/teks/JSON |
 
 ## 10. Kontrak tool media (model-internal)
 
@@ -663,3 +667,8 @@ Hanya diekspos saat `plan.videoEngine === "python"` (jalur gratis, atau donatur 
 ```
 
 `stderrTail` mentah dari sandbox, sudah dipotong agar total payload ≤2 KB (hasil tool dipotong sistem). Setelah sukses, blok `VideoBlock` di-emit ke FE. `UsageCounter(video_python)` dan `GlobalUsageCounter(python)` bertambah hanya saat sukses (§13.6). Abort klien → job cancelled, sandbox kill, workdir dibersihkan (§14.3).
+
+## 11. Endpoint Preferensi
+
+- `GET /api/me/preferences` → `{ personality: { mode: "auto" | "serious" | "casual" | "playful", note?: string } }`
+- `PUT /api/me/preferences` → Body: `{ personality: { mode: string, note?: string } }` (maks 300 char). Mengembalikan objek yang sama.
