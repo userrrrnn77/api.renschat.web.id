@@ -1,5 +1,5 @@
 // src/services/providers/flux2.client.ts
-import { env } from "@config/env.js"; 
+import { env } from "@config/env.js";
 import { postMediaGeneration } from "./nvidia.http.js";
 
 /**
@@ -26,7 +26,7 @@ export async function generateImageFlux2(
     prompt: req.prompt,
     width: req.width,
     height: req.height,
-    seed: req.seed ?? Math.floor(Math.random() * 2 ** 31),
+    // Parameter seed ternyata tidak didukung (extra_forbidden) di endpoint ini
     steps: env.FLUX2_STEPS,
   };
   const result = await postMediaGeneration(FLUX2_PATH, body, {

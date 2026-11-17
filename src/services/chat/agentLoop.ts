@@ -148,6 +148,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   let natural = false;
 
   const workingMessages: ChatMessage[] = [...input.messages];
+  let currentTools = input.tools;
+
   const provider = getProvider();
 
   for (let iter = 0; iter < MAX_ITER; iter++) {
@@ -175,8 +177,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
       const stream = provider.streamCompletion({
         model: input.model,
         messages: workingMessages,
-        ...(input.tools.length > 0
-          ? { tools: input.tools, toolChoice: "auto" as const }
+        ...(currentTools.length > 0
+          ? { tools: currentTools, toolChoice: "auto" as const }
           : {}),
         maxTokens: input.maxTokens,
         reasoning: input.reasoning,
@@ -330,6 +332,20 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         content: toolResult.content,
         tool_call_id: call.id,
       });
+
+      // Kalau tool media gagal (misal API key mati/limit), buang semua tool
+      // di iterasi berikutnya supaya model terpaksa minta maaf/jawab teks,
+      // bukan nge-loop manggil tool yang sama 8x.
+      if (!toolResult.ok && tool?.kind === "media") {
+        currentTools = [];
+        // Inject system message tegas agar model tidak nge-print XML mentah
+        workingMessages.push({
+          role: "system",
+          content: `Tool ${call.name} gagal dengan error: ${toolResult.content}. 
+JANGAN pernah menulis kode XML atau JSON tool-call di dalam jawabanmu. 
+Balas user dengan sopan, jelaskan secara singkat bahwa pembuatan gambar gagal (misal karena server sibuk atau error), lalu minta maaf.`,
+        });
+      }
 
       if (toolResult.endTurn) {
         endTurnByChoices = true;

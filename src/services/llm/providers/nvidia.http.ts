@@ -69,9 +69,12 @@ async function postOnce(
   });
 
   if (!res.ok) {
-    // Body error dibaca untuk mapping status; TIDAK di-log (bisa memuat
-    // prompt / data sensitif, §17).
-    await res.text().catch(() => "");
+    // SEMENTARA: Log error body untuk debugging
+    const errorText = await res.text().catch(() => "");
+    logger.error(
+      { context: path, status: res.status, errorText },
+      "NVIDIA media provider error",
+    );
     throw mapMediaHttpError(res.status, path);
   }
   const json: unknown = await res.json();
@@ -134,11 +137,12 @@ export async function postMediaGeneration(
 /**
  * POST ke endpoint cosmos (video) dengan timeout keras dan abort eksternal
  * (§12.1: `COSMOS_TIMEOUT_MS=600000`, menghormati `signal`).
+ * Catatan: Cosmos juga ada di bawah /genai, bukan /cosmos (yang bikin 404).
  */
 export async function postCosmosGeneration(
   path: string,
   body: unknown,
   opts: MediaPostOptions,
 ): Promise<MediaPostResult> {
-  return postWithBaseUrl(COSMOS_BASE_URL, path, body, opts);
+  return postWithBaseUrl(GENAI_BASE_URL, path, body, opts);
 }

@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { listTools, listToolNames } from "./registry.js";
 import type { ToolDefinition } from "../llm/nvidiaClient.js";
+import { env } from "@config/env.js";
 
 // Side-effect: register tools
 import "./ui.js";
@@ -13,6 +14,12 @@ import "./terminal.js";
 import "./generateImage.js";
 import "./generateVideoCosmos.js";
 import "./generateVideoPython.js";
+import { registerWebScrapeTool } from "./webScrape.js";
+
+// Tool web scrape didaftarkan secara kondisional
+if (env.WEB_SCRAPE_ENABLED) {
+  registerWebScrapeTool();
+}
 
 export { getTool, listTools, listToolNames } from "./registry.js";
 export type { ToolContext, ToolResult, ToolDef } from "./registry.js";

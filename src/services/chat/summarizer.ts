@@ -86,7 +86,7 @@ function buildPrompt(prevSummary: string, items: SummaryItem[]): string {
     .join("\n\n");
   return `Kamu merangkum percakapan. Jawab LANGSUNG dengan ringkasan markdown, tanpa penjelasan proses berpikir.
 
-Gabungkan ringkasan lama dengan pesan-pesan baru di bawah ini menjadi satu ringkasan markdown (~1500 token, bahasa mengikuti percakapan). Wajib ada bagian: Tujuan user, Keputusan, Constraint, Entitas penting, Tugas terbuka, File penting (nama + fileId), Preferensi. Jangan menghilangkan info penting dari ringkasan lama.
+Gabungkan ringkasan lama dengan pesan-pesan baru di bawah ini menjadi satu ringkasan markdown (~1500 token, bahasa mengikuti percakapan). Wajib ada bagian: Tujuan user, Keputusan, Constraint, Entitas penting, Tugas terbuka, File penting (nama + fileId), Preferensi. Tambahkan 1 kalimat "Gaya bahasa user" (formalitas, sapaan, bahasa) agar gaya tetap terbawa. Jangan menghilangkan info penting dari ringkasan lama.
 
 ${prevSummary ? `Ringkasan lama:\n${prevSummary}\n\n` : ""}Pesan yang diringkas:
 ${body}`;

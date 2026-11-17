@@ -4,7 +4,7 @@ import { env } from "./env.js";
 
 export const logger = pino({
   level: env.NODE_ENV === "development" ? "debug" : "info",
-  base: { service: "genui-backend" },
+  base: { service: "renschat-backend" },
   redact: {
     paths: [
       "req.headers.authorization",

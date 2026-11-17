@@ -6,9 +6,20 @@ import { env } from "../config/env.js";
 import { UserModel } from "../models/User.js";
 import { AppError } from "../middleware/error.js";
 import { getUserId } from "../middleware/auth.js";
-import { signToken, COOKIE_NAME, COOKIE_MAX_AGE_MS } from "../services/auth/tokens.js";
-
-// ─── Schemas ───────────────────────────────────────────────────────────────
+import {
+  signToken,
+  COOKIE_NAME,
+  COOKIE_MAX_AGE_MS,
+} from "../services/auth/tokens.js";
+import {
+  generatePkce,
+  buildAuthUrl,
+  createStateToken,
+  verifyStateToken,
+  exchangeCode,
+  verifyIdToken,
+  linkOrCreateUser,
+} from "../services/auth/google.js";
 
 const RegisterBody = z.object({
   email: z.string().email().toLowerCase().trim(),
@@ -21,8 +32,6 @@ const LoginBody = z.object({
   email: z.string().email().toLowerCase().trim(),
   password: z.string().min(1).max(128),
 });
-
-// ─── Helpers ───────────────────────────────────────────────────────────────
 
 function setAuthCookie(res: Response, token: string): void {
   res.cookie(COOKIE_NAME, token, {
@@ -39,23 +48,20 @@ interface PublicUserInput {
   email: string;
   name: string;
   timezone: string;
+  avatarUrl?: string | null;
+  authProviders?: string[] | null;
 }
 
-function publicUser(u: PublicUserInput): {
-  id: string;
-  email: string;
-  name: string;
-  timezone: string;
-} {
+function publicUser(u: PublicUserInput) {
   return {
     id: String(u._id),
     email: u.email,
     name: u.name,
     timezone: u.timezone,
+    ...(u.avatarUrl ? { avatarUrl: u.avatarUrl } : {}),
+    ...(u.authProviders ? { authProviders: u.authProviders } : {}),
   };
 }
-
-// ─── Handlers ──────────────────────────────────────────────────────────────
 
 export async function register(req: Request, res: Response): Promise<void> {
   const body = RegisterBody.parse(req.body);
@@ -72,6 +78,7 @@ export async function register(req: Request, res: Response): Promise<void> {
     passwordHash,
     name: body.name,
     timezone: body.timezone ?? env.DEFAULT_TIMEZONE,
+    authProviders: ["password"],
   });
 
   const token = await signToken(user._id.toString());
@@ -84,7 +91,8 @@ export async function login(req: Request, res: Response): Promise<void> {
   const body = LoginBody.parse(req.body);
 
   const user = await UserModel.findOne({ email: body.email });
-  if (!user) throw AppError.unauthorized("Invalid credentials");
+  if (!user || !user.passwordHash)
+    throw AppError.unauthorized("Invalid credentials");
 
   const ok = await Bun.password.verify(body.password, user.passwordHash);
   if (!ok) throw AppError.unauthorized("Invalid credentials");
@@ -104,4 +112,68 @@ export async function me(_req: Request, res: Response): Promise<void> {
   const user = await UserModel.findById(getUserId(res)).lean();
   if (!user) throw AppError.unauthorized();
   res.json(publicUser(user));
+}
+
+// ── Google OAuth ───────────────────────────────────────────────────────────
+
+const STATE_COOKIE = "renschat_google_state";
+
+export async function googleStart(_req: Request, res: Response): Promise<void> {
+  if (!env.GOOGLE_AUTH_ENABLED) throw AppError.notFound();
+
+  const { verifier, challenge, nonce, state } = generatePkce();
+  const stateToken = await createStateToken(state, nonce, verifier);
+
+  res.cookie(STATE_COOKIE, stateToken, {
+    httpOnly: true,
+    secure: env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 10 * 60 * 1000,
+    path: "/api/auth/google",
+  });
+
+  const url = await buildAuthUrl(state, challenge, nonce);
+  res.redirect(url);
+}
+
+export async function googleCallback(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  if (!env.GOOGLE_AUTH_ENABLED) throw AppError.notFound();
+
+  const { code, state, error } = req.query;
+  const postLogin =
+    env.GOOGLE_POST_LOGIN_REDIRECT || `${env.CLIENT_ORIGIN[0]}/`;
+
+  if (error || !code || typeof code !== "string") {
+    res.redirect(`${postLogin}login?error=google_failed`);
+    return;
+  }
+
+  const stateToken = req.cookies[STATE_COOKIE];
+  res.clearCookie(STATE_COOKIE, { path: "/api/auth/google" });
+
+  if (!stateToken) {
+    res.redirect(`${postLogin}login?error=state_missing`);
+    return;
+  }
+
+  try {
+    const parsedState = await verifyStateToken(stateToken);
+    if (parsedState.state !== state) {
+      throw new Error("State mismatch");
+    }
+
+    const idToken = await exchangeCode(code, parsedState.verifier);
+    const payload = await verifyIdToken(idToken, parsedState.nonce);
+    const user = await linkOrCreateUser(payload);
+
+    const token = await signToken(user._id.toString());
+    setAuthCookie(res, token);
+
+    res.redirect(postLogin);
+  } catch (err) {
+    res.redirect(`${postLogin}login?error=google_failed`);
+  }
 }

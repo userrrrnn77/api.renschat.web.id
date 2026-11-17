@@ -3,6 +3,7 @@ import type { Block } from "../blocks/schemas.js";
 import type { ChatMessage } from "../llm/nvidiaClient.js";
 import { env } from "../../config/env.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
+import { analyzeStyle } from "./styleProfile.js";
 import { ChunkModel } from "../../models/Chunk.js";
 import { FileDocModel } from "../../models/FileDoc.js";
 import type { GenerationPlan } from "../generation/plan.js";
@@ -182,6 +183,10 @@ export interface ContextMessage {
 
 export interface ContextUser {
   timezone: string;
+  personality?: {
+    mode: "auto" | "serious" | "casual" | "playful";
+    note?: string;
+  };
 }
 
 export interface ContextFileDoc {
@@ -276,6 +281,41 @@ async function buildAttachmentBlock(
   return { block: parts.join("\n\n"), inlinedIds };
 }
 
+function buildUserStyleBlock(
+  history: ContextMessage[],
+  currentUserText: string,
+  personality?: ContextUser["personality"],
+): string | null {
+  if (!env.PERSONALITY_ENABLED) return null;
+
+  const recentUserMsgs = history
+    .filter((m) => m.role === "user" && m.status === "done")
+    .slice(-5)
+    .map((m) => blocksToText(m.blocks));
+  recentUserMsgs.push(currentUserText);
+
+  const style = analyzeStyle(recentUserMsgs);
+
+  const lines: string[] = [`<user_style>`];
+  lines.push(`tone: ${style.tone}`);
+  lines.push(`formality: ${style.formality}`);
+  lines.push(`pronouns: ${style.pronouns}`);
+  lines.push(`uses_slang: ${style.usesSlang}`);
+  lines.push(`uses_emoji: ${style.usesEmoji}`);
+  lines.push(`length: ${style.length}`);
+  lines.push(`language: ${style.language}`);
+
+  if (personality && personality.mode !== "auto") {
+    lines.push(`tone: ${personality.mode}`);
+  }
+  if (personality && personality.note) {
+    lines.push(`user_preference_note: "${personality.note}"`);
+  }
+
+  lines.push(`</user_style>`);
+  return lines.join("\n");
+}
+
 function messageToChatMessage(m: ContextMessage): ChatMessage | null {
   if (m.role === "tool") return null;
   if (m.status === "streaming") return null;
@@ -296,6 +336,18 @@ export async function buildContext(
       }),
     },
   ];
+
+  const styleBlock = buildUserStyleBlock(
+    input.history,
+    input.currentUserText,
+    input.user.personality,
+  );
+  if (styleBlock) {
+    systemMessages.push({
+      role: "system",
+      content: styleBlock,
+    });
+  }
 
   if (input.session.summary) {
     systemMessages.push({

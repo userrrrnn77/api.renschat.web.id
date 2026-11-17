@@ -16,16 +16,13 @@ export interface Flux3Request {
   prompt: string;
   width: number;
   height: number;
-  /** 0 = acak (§4.3). */
-  seed?: number;
 }
 
-/** Body sesuai §4.3: mode + prompt + ukuran + cfg_scale + steps + seed + samples. */
+/** Body sesuai §4.3: mode + prompt + ukuran + cfg_scale + steps + samples. */
 function buildBody(
   req: Flux3Request,
   width: number,
   height: number,
-  seed: number,
 ): Record<string, unknown> {
   return {
     mode: "Image Generation",
@@ -34,7 +31,6 @@ function buildBody(
     height,
     cfg_scale: env.FLUX3_CFG_SCALE,
     steps: env.FLUX3_STEPS,
-    seed,
     samples: 1,
   };
 }
@@ -48,12 +44,10 @@ export async function generateImageFlux3(
   req: Flux3Request,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  const seed = req.seed ?? 0;
-
   try {
     const result = await postMediaGeneration(
       FLUX3_PATH,
-      buildBody(req, req.width, req.height, seed),
+      buildBody(req, req.width, req.height),
       { timeoutMs: env.IMAGE_TIMEOUT_MS, signal, context: "flux3" },
     );
     return result.json;
@@ -70,7 +64,7 @@ export async function generateImageFlux3(
     );
     const result = await postMediaGeneration(
       FLUX3_PATH,
-      buildBody(req, FALLBACK_SIZE, FALLBACK_SIZE, seed),
+      buildBody(req, FALLBACK_SIZE, FALLBACK_SIZE),
       { timeoutMs: env.IMAGE_TIMEOUT_MS, signal, context: "flux3-retry" },
     );
     return result.json;

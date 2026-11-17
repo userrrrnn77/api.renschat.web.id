@@ -35,9 +35,10 @@ export interface ToolResult {
 
 export interface ToolDef {
   name: string;
-  kind: "ui" | "file" | "attachment" | "command" | "media";
+  kind: "ui" | "file" | "attachment" | "command" | "media" | "web";
   description: string;
   schema: z.ZodTypeAny;
+  maxResultChars?: number;
   run: (args: unknown, ctx: ToolContext) => Promise<ToolResult>;
 }
 
@@ -64,14 +65,18 @@ export function listToolNames(): string[] {
 
 const MAX_TOOL_RESULT_LEN = 2048;
 
-export function truncateResult(s: string): string {
-  return s.length > MAX_TOOL_RESULT_LEN ? s.slice(0, MAX_TOOL_RESULT_LEN) : s;
+export function truncateResult(
+  s: string,
+  maxLen = MAX_TOOL_RESULT_LEN,
+): string {
+  return s.length > maxLen ? s.slice(0, maxLen) : s;
 }
 
 export function errorResult(
   code: string,
   message: string,
   hint?: unknown,
+  maxLen = MAX_TOOL_RESULT_LEN,
 ): ToolResult {
   const payload: Record<string, unknown> = {
     ok: false,
@@ -79,12 +84,18 @@ export function errorResult(
     message,
   };
   if (hint !== undefined) payload.hint = hint;
-  return { ok: false, content: truncateResult(JSON.stringify(payload)) };
+  return {
+    ok: false,
+    content: truncateResult(JSON.stringify(payload), maxLen),
+  };
 }
 
-export function okResult(data: Record<string, unknown>): ToolResult {
+export function okResult(
+  data: Record<string, unknown>,
+  maxLen = MAX_TOOL_RESULT_LEN,
+): ToolResult {
   return {
     ok: true,
-    content: truncateResult(JSON.stringify({ ok: true, ...data })),
+    content: truncateResult(JSON.stringify({ ok: true, ...data }), maxLen),
   };
 }

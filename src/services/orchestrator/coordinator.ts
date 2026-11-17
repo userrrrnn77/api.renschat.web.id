@@ -388,7 +388,10 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
 
     const { messages } = await buildContext({
       session: { summary: session.summary ?? "" },
-      user: { timezone: user.timezone },
+      user: {
+        timezone: user.timezone,
+        personality: user.personality ?? undefined,
+      },
       history: history.map((m) => ({
         _id: m._id,
         role: m.role,
