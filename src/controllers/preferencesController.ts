@@ -1,4 +1,3 @@
-// src/controllers/preferencesController.ts
 import type { Request, Response } from "express";
 import { z } from "zod";
 import { getUserId } from "../middleware/auth.js";
@@ -19,13 +18,17 @@ export async function getPreferences(
   res: Response,
 ): Promise<void> {
   const userId = getUserId(res);
-  const user = await UserModel.findById(userId).select("personality").lean();
+  const user = await UserModel.findById(userId)
+    .select("personality styleProfile")
+    .lean();
   if (!user) throw AppError.unauthorized();
 
   const personality = user.personality || { mode: "auto" };
+  const styleProfile = user.styleProfile ?? null;
 
   res.json({
     personality,
+    styleProfile,
   });
 }
 
@@ -54,14 +57,16 @@ export async function updatePreferences(
   const user = await UserModel.findByIdAndUpdate(
     userId,
     { $set: update },
-    { new: true, select: "personality" },
+    { new: true, select: "personality styleProfile" },
   ).lean();
 
   if (!user) throw AppError.unauthorized();
 
   const personality = user.personality || { mode: "auto" };
+  const styleProfile = user.styleProfile ?? null;
 
   res.json({
     personality,
+    styleProfile,
   });
 }

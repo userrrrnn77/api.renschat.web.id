@@ -18,6 +18,7 @@ export interface VectorStore {
     queryVec: number[],
     filter: Record<string, unknown>,
     limit: number,
+    signal?: AbortSignal,
   ): Promise<VectorSearchResult[]>;
 }
 
@@ -31,14 +32,18 @@ interface RawChunk {
 
 /**
  * Mongo implementation. Cosine in-memory (scan ≤ EMBEDDING_SCAN_LIMIT
- * chunk terbaru). Sesuai PRD D3 — tanpa pgvector.
+ * chunk terbaru). Sesuai PRD D3 — tanpa pgvector. Abort signal dihormati:
+ * return [] saat user cancel (caller lanjut text-only / berhenti).
  */
 class MongoVectorStore implements VectorStore {
   async search(
     queryVec: number[],
     filter: Record<string, unknown>,
     limit: number,
+    signal?: AbortSignal,
   ): Promise<VectorSearchResult[]> {
+    if (signal?.aborted) return [];
+
     const candidates = (await ChunkModel.find({
       ...filter,
       embedding: { $exists: true },
@@ -48,8 +53,11 @@ class MongoVectorStore implements VectorStore {
       .limit(EMBEDDING_SCAN_LIMIT)
       .lean()) as unknown as RawChunk[];
 
+    if (signal?.aborted) return [];
+
     const scored: VectorSearchResult[] = [];
     for (const c of candidates) {
+      if (signal?.aborted) return [];
       if (!Array.isArray(c.embedding)) continue;
       const sim = cosineSimilarity(queryVec, c.embedding);
       scored.push({

@@ -1,4 +1,3 @@
-// src/models/User.ts
 import mongoose, { Schema, type InferSchemaType, type Model } from "mongoose";
 
 const creditsSchema = new Schema(
@@ -17,6 +16,43 @@ const personalitySchema = new Schema(
       default: "auto",
     },
     note: { type: String, maxlength: 300, default: "" },
+  },
+  { _id: false },
+);
+
+// Phase 8: profil gaya persisten yang dipelajari bertahap.
+const styleProfileSchema = new Schema(
+  {
+    tone: {
+      type: String,
+      enum: ["serious", "casual", "playful"],
+      default: "casual",
+    },
+    formality: {
+      type: String,
+      enum: ["formal", "neutral", "informal"],
+      default: "neutral",
+    },
+    pronouns: {
+      type: String,
+      enum: ["gw-lu", "aku-kamu", "saya-anda", "none"],
+      default: "none",
+    },
+    slangRate: { type: Number, default: 0, min: 0, max: 1 },
+    emojiRate: { type: Number, default: 0, min: 0, max: 1 },
+    length: {
+      type: String,
+      enum: ["short", "medium", "long"],
+      default: "medium",
+    },
+    language: {
+      type: String,
+      enum: ["id", "en", "mixed"],
+      default: "id",
+    },
+    confidence: { type: Number, default: 0, min: 0, max: 1 },
+    sampleCount: { type: Number, default: 0, min: 0 },
+    lastUpdated: { type: Date, default: undefined },
   },
   { _id: false },
 );
@@ -44,6 +80,7 @@ const userSchema = new Schema(
     credits: { type: creditsSchema, default: undefined },
     donorSince: { type: Date, default: undefined },
     personality: { type: personalitySchema, default: undefined },
+    styleProfile: { type: styleProfileSchema, default: undefined },
   },
   { timestamps: true },
 );

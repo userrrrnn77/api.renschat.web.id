@@ -5,11 +5,17 @@ import {
   type ChatMessage,
   type Usage,
   type ToolDefinition,
+  UpstreamError,
 } from "../llm/nvidiaClient.js";
 import { FenceParser } from "../llm/fenceParser.js";
 import type { Block } from "../blocks/schemas.js";
 import { env } from "../../config/env.js";
+import { logger } from "../../config/logger.js";
 import { BlockEmitter } from "./blockEmitter.js";
+import {
+  StreamingResponseSanitizer,
+  sanitizeFinalText,
+} from "./responseSanitizer.js";
 import type { ClarificationQuestion } from "../orchestrator/clarification.js";
 import {
   ClarificationTimeoutError,
@@ -25,6 +31,7 @@ import {
 } from "../tools/registry.js";
 import type { GenerationPlan } from "../generation/plan.js";
 import { getProvider, type ReasoningEffort } from "../llm/provider.js";
+import { classifyProviderError } from "../llm/errorClassify.js";
 import { createThinkingForwarder } from "./thinkingStream.js";
 
 export interface AgentCallbacks {
@@ -58,9 +65,10 @@ export interface AgentResult {
   usage?: Usage;
   aborted: boolean;
   error?: string;
+  /** Kode error publik (PROVIDER_ERROR, RATE_LIMITED, dst). */
+  errorCode?: string;
   endTurnByChoices: boolean;
 }
-
 interface PartialToolCall {
   id?: string;
   name?: string;
@@ -144,6 +152,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   let usage: Usage | undefined;
   let aborted = false;
   let error: string | undefined;
+  let errorCode: string | undefined;
   let endTurnByChoices = false;
   let natural = false;
 
@@ -158,10 +167,23 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
       break;
     }
 
+    // Sanitizer per-iterasi: mencegah raw tool-call XML dari model
+    // pernah mencapai parser → emitter → SSE → TextBlock.
+    const sanitizer = new StreamingResponseSanitizer();
+
     const parser = new FenceParser({
       start: (_i, block) => emitter.start(block),
       delta: (i, delta) => emitter.delta(i, delta),
-      end: (i, block) => emitter.end(i, block),
+      end: (i, block) => {
+        if (block.type === "text") {
+          emitter.end(i, {
+            type: "text",
+            markdown: sanitizeFinalText(block.markdown),
+          });
+          return;
+        }
+        emitter.end(i, block);
+      },
     });
 
     const toolCallAcc = new Map<number, PartialToolCall>();
@@ -170,6 +192,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     });
 
     let iterError: string | undefined;
+    let iterErrorCode: string | undefined;
     let iterContent = "";
     let firstContentOrToolSeen = false;
 
@@ -200,8 +223,11 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             firstContentOrToolSeen = true;
             thinking.end();
           }
-          parser.feed(chunk.content);
-          iterContent += chunk.content;
+          const safe = sanitizer.push(chunk.content);
+          if (safe) {
+            parser.feed(safe);
+            iterContent += safe;
+          }
         }
 
         if (chunk.toolCalls) {
@@ -216,15 +242,34 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
       }
     } catch (err) {
       if (input.signal.aborted) aborted = true;
-      else iterError = err instanceof Error ? err.message : String(err);
+      else {
+        logger.error(
+          {
+            err,
+            sessionId: input.sessionId.toString(),
+            iteration: iter,
+          },
+          "agent loop stream error",
+        );
+        const classified = classifyProviderError(err);
+        iterError = classified.message;
+        iterErrorCode = classified.code;
+      }
     }
 
     thinking.end();
+
+    const tail = sanitizer.finish();
+    if (tail) {
+      parser.feed(tail);
+      iterContent += tail;
+    }
     parser.finish();
 
     if (aborted) break;
     if (iterError) {
       error = iterError;
+      errorCode = iterErrorCode ?? "STREAM_ERROR";
       break;
     }
 
@@ -341,9 +386,9 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         // Inject system message tegas agar model tidak nge-print XML mentah
         workingMessages.push({
           role: "system",
-          content: `Tool ${call.name} gagal dengan error: ${toolResult.content}. 
+          content: `Operasi ${call.name} gagal dengan error: ${toolResult.content}. 
 JANGAN pernah menulis kode XML atau JSON tool-call di dalam jawabanmu. 
-Balas user dengan sopan, jelaskan secara singkat bahwa pembuatan gambar gagal (misal karena server sibuk atau error), lalu minta maaf.`,
+Balas user dengan sopan, jelaskan secara singkat dalam bahasa manusia bahwa operasinya gagal (misal karena server sibuk), lalu minta maaf. Jangan sebut nama tool, parameter, atau detail teknis apa pun.`,
         });
       }
 
@@ -373,6 +418,7 @@ Balas user dengan sopan, jelaskan secara singkat bahwa pembuatan gambar gagal (m
     ...(usage !== undefined ? { usage } : {}),
     aborted,
     ...(error !== undefined ? { error } : {}),
+    ...(errorCode !== undefined ? { errorCode } : {}),
     endTurnByChoices,
   };
 }

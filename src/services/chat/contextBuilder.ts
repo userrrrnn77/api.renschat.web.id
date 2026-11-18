@@ -3,7 +3,13 @@ import type { Block } from "../blocks/schemas.js";
 import type { ChatMessage } from "../llm/nvidiaClient.js";
 import { env } from "../../config/env.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
-import { analyzeStyle } from "./styleProfile.js";
+import {
+  detectStyle,
+  detectExplicitStyleHint,
+  profileToStyle,
+  type PersistedStyleProfile,
+  type StyleProfile,
+} from "./styleProfile.js";
 import { ChunkModel } from "../../models/Chunk.js";
 import { FileDocModel } from "../../models/FileDoc.js";
 import type { GenerationPlan } from "../generation/plan.js";
@@ -187,6 +193,7 @@ export interface ContextUser {
     mode: "auto" | "serious" | "casual" | "playful";
     note?: string;
   };
+  styleProfile?: PersistedStyleProfile;
 }
 
 export interface ContextFileDoc {
@@ -285,6 +292,7 @@ function buildUserStyleBlock(
   history: ContextMessage[],
   currentUserText: string,
   personality?: ContextUser["personality"],
+  persisted?: PersistedStyleProfile,
 ): string | null {
   if (!env.PERSONALITY_ENABLED) return null;
 
@@ -294,25 +302,52 @@ function buildUserStyleBlock(
     .map((m) => blocksToText(m.blocks));
   recentUserMsgs.push(currentUserText);
 
-  const style = analyzeStyle(recentUserMsgs);
+  const detection = detectStyle(recentUserMsgs);
+  const explicitHint = detectExplicitStyleHint(currentUserText);
 
-  const lines: string[] = [`<user_style>`];
-  lines.push(`tone: ${style.tone}`);
-  lines.push(`formality: ${style.formality}`);
-  lines.push(`pronouns: ${style.pronouns}`);
-  lines.push(`uses_slang: ${style.usesSlang}`);
-  lines.push(`uses_emoji: ${style.usesEmoji}`);
-  lines.push(`length: ${style.length}`);
-  lines.push(`language: ${style.language}`);
+  let base: StyleProfile = persisted
+    ? profileToStyle(persisted)
+    : detection.profile;
 
-  if (personality && personality.mode !== "auto") {
-    lines.push(`tone: ${personality.mode}`);
+  // Sinyal turn-terkini yang kuat boleh override tampilan turn ini saja.
+  if (persisted && detection.confidence >= 0.6) {
+    base = { ...base, ...detection.profile };
+  }
+
+  // Explicit hint di pesan sekarang mengalahkan heuristik (tapi bukan mode).
+  const effective: StyleProfile = explicitHint
+    ? { ...base, ...explicitHint }
+    : base;
+
+  const lines: string[] = ["<user_style>"];
+
+  const finalTone =
+    personality && personality.mode !== "auto"
+      ? personality.mode
+      : effective.tone;
+
+  lines.push(`tone: ${finalTone}`);
+  lines.push(`formality: ${effective.formality}`);
+  lines.push(`pronouns: ${effective.pronouns}`);
+  lines.push(`uses_slang: ${effective.usesSlang}`);
+  lines.push(`uses_emoji: ${effective.usesEmoji}`);
+  lines.push(`length: ${effective.length}`);
+  lines.push(`language: ${effective.language}`);
+
+  if (persisted && persisted.sampleCount > 0) {
+    lines.push(`profile_confidence: ${persisted.confidence.toFixed(2)}`);
+  }
+  if (explicitHint) {
+    lines.push(`explicit_hint_applied: true`);
+  }
+  if (detection.sensitiveTopic) {
+    lines.push(`sensitive_topic: true`);
   }
   if (personality && personality.note) {
     lines.push(`user_preference_note: "${personality.note}"`);
   }
 
-  lines.push(`</user_style>`);
+  lines.push("</user_style>");
   return lines.join("\n");
 }
 
@@ -341,6 +376,7 @@ export async function buildContext(
     input.history,
     input.currentUserText,
     input.user.personality,
+    input.user.styleProfile,
   );
   if (styleBlock) {
     systemMessages.push({
@@ -387,7 +423,6 @@ export async function buildContext(
     remaining -= t;
   }
 
-  // Volatil: waktu resolusi menit + grounded context RAG
   const now = new Date().toLocaleString("id-ID", {
     timeZone: input.user.timezone,
     dateStyle: "full",
@@ -402,7 +437,6 @@ export async function buildContext(
     ...(input.extraSystemMessages ?? []),
   ];
 
-  // Statis → history → volatil → user terakhir
   const messages: ChatMessage[] = [
     ...systemMessages,
     ...kept,

@@ -7,6 +7,10 @@ import { FileDocModel } from "../../models/FileDoc.js";
 import { embedTexts } from "../ingest/embedder.js";
 import { getVectorStore } from "./vectorStore.js";
 import type { RetrievedChunk, RetrieveOptions } from "./types.js";
+import {
+  classifyPromptComplexity,
+  decideRetrieval,
+} from "./promptComplexity.js";
 
 const RRF_K = 60;
 
@@ -39,19 +43,22 @@ async function resolveQueryVec(
   question: string,
   opts: RetrieveOptions,
 ): Promise<number[] | null> {
+  if (opts.signal?.aborted) return null;
   if (opts.queryVec !== undefined) {
     try {
       return await opts.queryVec;
     } catch (err) {
+      if (opts.signal?.aborted) return null;
       logger.warn({ err }, "queryVec promise rejected; text-only fallback");
       return null;
     }
   }
   if (!env.EMBEDDING_ENABLED) return null;
   try {
-    const vecs = await embedTexts([question], "query");
+    const vecs = await embedTexts([question], "query", opts.signal);
     return vecs[0] ?? null;
   } catch (err) {
+    if (opts.signal?.aborted) return null;
     logger.warn({ err }, "query embedding failed; text-only fallback");
     return null;
   }
@@ -71,11 +78,14 @@ interface Merged {
 /**
  * Hybrid retrieval (vector + $text) dengan Reciprocal Rank Fusion.
  * Source tunggal kebenaran untuk tool `search_attachment` dan pipeline RAG.
+ * Abort signal dihormati: return [] (tidak throw) saat user cancel.
  */
 export async function retrieveRelevantChunks(
   question: string,
   opts: RetrieveOptions,
 ): Promise<RetrievedChunk[]> {
+  if (opts.signal?.aborted) return [];
+
   const topK = opts.topK ?? env.RAG_TOP_K;
   const minSim = opts.minSim ?? env.RAG_MIN_SIM;
   const baseFilter = buildBaseFilter(opts);
@@ -91,7 +101,12 @@ export async function retrieveRelevantChunks(
   }> = [];
   if (queryVec) {
     const vs = getVectorStore();
-    const results = await vs.search(queryVec, baseFilter, topK * 3);
+    const results = await vs.search(
+      queryVec,
+      baseFilter,
+      topK * 3,
+      opts.signal,
+    );
     for (const r of results) {
       semanticRanked.push({
         chunkId: r.chunkId,
@@ -102,6 +117,8 @@ export async function retrieveRelevantChunks(
       });
     }
   }
+
+  if (opts.signal?.aborted) return [];
 
   // 2. Text search
   let textRanked: RawTextChunk[] = [];
@@ -115,6 +132,16 @@ export async function retrieveRelevantChunks(
       .lean()) as unknown as RawTextChunk[];
   } catch (err) {
     logger.debug({ err }, "text search failed");
+  }
+
+  if (!queryVec && textRanked.length > 0) {
+    logger.info(
+      {
+        sessionId: opts.sessionId.toString(),
+        textHits: textRanked.length,
+      },
+      "retrieval text-only fallback (no query vector)",
+    );
   }
 
   // 3. RRF merge
@@ -194,10 +221,28 @@ export function shouldRetrieve(input: {
   files: Array<{ _id: unknown; status: string }>;
   enabled: boolean;
 }): boolean {
+  if (!env.RAG_SMART_EMBEDDING) {
+    // Legacy behavior (Phase 3): retrieve selama ada file ready dan teks >= 8.
+    if (!input.enabled) return false;
+    if (input.text.length < 8) return false;
+    const inlined = new Set(input.attachmentIds);
+    return input.files.some(
+      (f) => f.status === "ready" && !inlined.has(String(f._id)),
+    );
+  }
+
   if (!input.enabled) return false;
   if (input.text.length < 8) return false;
-  const inlined = new Set(input.attachmentIds);
-  return input.files.some(
-    (f) => f.status === "ready" && !inlined.has(String(f._id)),
-  );
+
+  const complexity = classifyPromptComplexity({
+    text: input.text,
+    attachmentIds: input.attachmentIds,
+  });
+
+  return decideRetrieval({
+    complexity: complexity.category,
+    files: input.files,
+    attachmentIds: input.attachmentIds,
+    enabled: input.enabled,
+  }).needsRetrieval;
 }

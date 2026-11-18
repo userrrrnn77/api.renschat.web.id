@@ -1,4 +1,3 @@
-// src/config/env.ts
 import { z } from "zod";
 
 const BoolStr = z.enum(["true", "false"]).transform((v) => v === "true");
@@ -64,6 +63,7 @@ const EnvSchema = z
 
     // RAG (Phase 2)
     RAG_ENABLED: BoolStr.default(true),
+    RAG_SMART_EMBEDDING: BoolStr.default(true),
     RAG_TOP_K: IntStr.positive().max(50).default(6),
     RAG_MIN_SIM: z.coerce.number().min(0).max(1).default(0.3),
     RAG_TIMEOUT_MS: IntStr.positive().default(5000),
@@ -75,6 +75,12 @@ const EnvSchema = z
     EMBEDDING_MODEL: z.string().default("nvidia/nemotron-3.5-embed-8b"),
     EMBEDDING_DIM: IntStr.positive().default(4096),
     EMBEDDING_BATCH_SIZE: IntStr.positive().max(128).default(32),
+
+    // timeout, retry & concurrency control.
+    EMBEDDING_TIMEOUT_MS: IntStr.positive().max(120_000).default(20_000),
+    EMBEDDING_MAX_ATTEMPTS: IntStr.positive().max(6).default(3),
+    EMBEDDING_RETRY_BASE_MS: IntStr.positive().max(10_000).default(500),
+    EMBEDDING_CONCURRENCY: IntStr.positive().max(16).default(4),
 
     // Web Scrape (Fase 3)
     WEB_SCRAPE_ENABLED: BoolStr.default(true),
@@ -102,6 +108,21 @@ const EnvSchema = z
     R2_BUCKET: z.string().min(1),
     R2_PUBLIC_URL: z.string().min(1).optional(),
     REDIS_URL: z.string().url().optional(),
+
+    // Prompt Cache (Phase 2)
+    PROMPT_CACHE_ENABLED: BoolStr.default(true),
+    PROMPT_CACHE_TTL_SECONDS: IntStr.positive()
+      .max(7 * 24 * 60 * 60)
+      .default(24 * 60 * 60),
+    PROMPT_CACHE_MAX_BYTES: IntStr.positive().default(262_144),
+
+    // Rate limit Redis fallback (Phase 7)
+    RATE_LIMIT_REDIS_TIMEOUT_MS: IntStr.positive().max(10_000).default(1500),
+    RATE_LIMIT_REDIS_COOLDOWN_MS: IntStr.positive().max(300_000).default(5000),
+    RATE_LIMIT_MEMORY_MAX_ENTRIES: IntStr.positive()
+      .max(1_000_000)
+      .default(10_000),
+    RATE_LIMIT_MEMORY_SWEEP_MS: IntStr.positive().max(600_000).default(60_000),
 
     // Media generation — storage & flush (Fase 1)
     ASSET_TTL_HOURS: IntStr.positive()

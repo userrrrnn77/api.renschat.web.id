@@ -33,9 +33,23 @@ import type { Usage, ChatMessage } from "../llm/nvidiaClient.js";
 import { retrieveRelevantChunks, shouldRetrieve } from "../rag/retriever.js";
 import { buildGroundedMessage, toSourcesPayload } from "../rag/generator.js";
 import type { RetrievedChunk, SourcePayload } from "../rag/types.js";
-import { embedTexts } from "../ingest/embedder.js";
+import { embedTexts, EmbeddingError } from "../ingest/embedder.js";
 import { classifyTurn } from "../harness/harness.js";
 import { runAgent } from "../chat/agentLoop.js";
+import {
+  buildCacheKey,
+  getCachedTurn,
+  setCachedTurn,
+  fingerprintString,
+} from "../cache/promptCache.js";
+import {
+  computeStyleProfileUpdate,
+  type PersistedStyleProfile,
+} from "../chat/styleProfile.js";
+import {
+  classifyPromptComplexity,
+  decideRetrieval,
+} from "../rag/promptComplexity.js";
 
 const LEGAL: Record<Phase, Phase[]> = {
   IDLE: ["CLARIFYING", "RETRIEVING", "GENERATING", "DONE", "ABORTED", "ERROR"],
@@ -119,6 +133,27 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
   const transition = makeTransition(sseSend);
   const emitter = new BlockEmitter(sseSend);
 
+  // ── Phase 9: pra-klasifikasi prompt (regex murni, sinkron) ──────
+  // Dipakai untuk memutuskan apakah pre-embed perlu dijalankan di
+  // Stage A. Keputusan retrieval final dibuat SETELAH klarifikasi
+  // (augmentedText final + files ter-load).
+  const textOnlyComplexity = env.RAG_SMART_EMBEDDING
+    ? classifyPromptComplexity({ text, attachmentIds })
+    : null;
+  const shouldPreEmbed =
+    env.EMBEDDING_ENABLED &&
+    (textOnlyComplexity === null || textOnlyComplexity.category === "complex");
+
+  logger.debug(
+    {
+      sessionId: sessionId.toString(),
+      category: textOnlyComplexity?.category ?? "legacy",
+      reasons: textOnlyComplexity?.reasons ?? [],
+      speculativePreEmbed: shouldPreEmbed,
+    },
+    "embedding complexity (pre-retrieval)",
+  );
+
   // ── Stage A: Paralel loading ─────────────────────────────────────
   const [session, user, history, files, attachmentDigests, preEmbedVec] =
     await Promise.all([
@@ -131,8 +166,6 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       })
         .sort({ createdAt: 1 })
         .lean(),
-      // §6.4 efek samping 1: manifest file tidak boleh memuat media
-      // generated yang sudah expired/flushed.
       FileDocModel.find({
         sessionId,
         status: { $in: ["ready", "processing"] },
@@ -153,11 +186,14 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
           }));
       })(),
       (async () => {
-        if (!env.EMBEDDING_ENABLED) return null;
+        if (!shouldPreEmbed) return null;
         try {
-          const vecs = await embedTexts([text], "query");
+          const vecs = await embedTexts([text], "query", signal);
           return vecs[0] ?? null;
         } catch (err) {
+          if (err instanceof EmbeddingError && err.aborted) {
+            return null;
+          }
           logger.warn({ err }, "pre-embed query failed");
           return null;
         }
@@ -176,8 +212,6 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
 
   try {
     // ── Generation plan (§8): dihitung di server, bukan oleh model.
-    // Error entitlement/kill-switch di sini ikut jalur catch di bawah
-    // supaya AppError.code sampai ke SSE event error.
     const plan = await resolveGenerationPlan(user, generation);
     const allowedToolNames = listTools()
       .filter((t) => t.kind !== "media" || plan.allowedMediaTools.has(t.name))
@@ -273,8 +307,6 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
 
     // ── Clarification detection ─────────────────────────────────────
     let augmentedText = text;
-    // §8.7: klarifikasi format dokumen tidak relevan saat user memilih
-    // mode media eksplisit; serahkan ke agent + system prompt.
     const explicitMediaMode =
       generation?.mode === "image" || generation?.mode === "video";
     const question = explicitMediaMode
@@ -294,13 +326,20 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
         });
 
     if (question) {
-      const doRetrievePre = shouldRetrieve({
+      // Prediksi apakah setelah klarifikasi akan ada retrieval.
+      const predictedComplexity = classifyPromptComplexity({
         text: augmentedText,
         attachmentIds,
+      });
+      const predictedRetrieval = decideRetrieval({
+        complexity: predictedComplexity.category,
         files: files.map((f) => ({ _id: f._id, status: f.status })),
+        attachmentIds,
         enabled: env.RAG_ENABLED,
       });
-      const resumePhase: Phase = doRetrievePre ? "RETRIEVING" : "GENERATING";
+      const resumePhase: Phase = predictedRetrieval.needsRetrieval
+        ? "RETRIEVING"
+        : "GENERATING";
 
       try {
         const answer = await askClarification(question, resumePhase);
@@ -339,17 +378,58 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       }
     }
 
-    // ── Retrieval ───────────────────────────────────────────────────
-    let retrieved: RetrievedChunk[] = [];
-    const doRetrieve = shouldRetrieve({
+    // ── Phase 9: retrieval decision (final) ─────────────────────────
+    const finalComplexity = classifyPromptComplexity({
       text: augmentedText,
       attachmentIds,
+    });
+    const retrievalDecision = decideRetrieval({
+      complexity: finalComplexity.category,
       files: files.map((f) => ({ _id: f._id, status: f.status })),
+      attachmentIds,
       enabled: env.RAG_ENABLED,
     });
 
+    logger.debug(
+      {
+        sessionId: sessionId.toString(),
+        category: finalComplexity.category,
+        reasons: finalComplexity.reasons,
+        needsRetrieval: retrievalDecision.needsRetrieval,
+        needsEmbedding: retrievalDecision.needsEmbedding,
+      },
+      "retrieval decision",
+    );
+
+    // ── Retrieval ───────────────────────────────────────────────────
+    let retrieved: RetrievedChunk[] = [];
+    const doRetrieve = retrievalDecision.needsRetrieval;
+    const effectiveNeedsEmbedding =
+      retrievalDecision.needsEmbedding && env.EMBEDDING_ENABLED;
+
     if (doRetrieve) {
       transition("RETRIEVING");
+
+      let queryVecPromise: Promise<number[] | null>;
+      if (effectiveNeedsEmbedding) {
+        if (preEmbedVec !== null) {
+          queryVecPromise = Promise.resolve(preEmbedVec);
+        } else {
+          // Edge case: teks awal terklasifikasi simple/medium sehingga
+          // pre-embed tidak jalan, tapi setelah klarifikasi jadi complex.
+          // Lazy-embed di sini agar retrieval tetap dapat vektor.
+          queryVecPromise = embedTexts([augmentedText], "query", signal)
+            .then((v) => v[0] ?? null)
+            .catch((err) => {
+              if (err instanceof EmbeddingError && err.aborted) return null;
+              logger.warn({ err }, "lazy query embedding failed");
+              return null;
+            });
+        }
+      } else {
+        // Medium / text-only: paksa retriever pakai text search saja.
+        queryVecPromise = Promise.resolve(null);
+      }
 
       try {
         retrieved = await Promise.race([
@@ -357,7 +437,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
             sessionId,
             excludeFileIds: attachmentIds,
             topK: env.RAG_TOP_K,
-            queryVec: Promise.resolve(preEmbedVec),
+            queryVec: queryVecPromise,
             signal,
           }),
           new Promise<RetrievedChunk[]>((resolve) => {
@@ -391,6 +471,8 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       user: {
         timezone: user.timezone,
         personality: user.personality ?? undefined,
+        styleProfile:
+          (user.styleProfile as PersistedStyleProfile | undefined) ?? undefined,
       },
       history: history.map((m) => ({
         _id: m._id,
@@ -429,6 +511,101 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       "harness decision",
     );
 
+    // ── Prompt cache lookup (Phase 2) ───────────────────────────────
+    const isMediaGeneration = explicitMediaMode;
+    let cacheKey: string | null = null;
+
+    if (env.PROMPT_CACHE_ENABLED && !isMediaGeneration) {
+      const historyFingerprint = fingerprintString(
+        history
+          .filter((m) => m.role !== "tool" && m.status !== "streaming")
+          .map((m) => `${String(m._id)}:${m.status}:${blocksToText(m.blocks)}`)
+          .join("\n"),
+      );
+      const attachmentFingerprint = fingerprintString(attachmentIds.join(","));
+      const filesFingerprint = fingerprintString(
+        files
+          .map((f) => `${String(f._id)}:v${f.version}:${f.status}`)
+          .join("|"),
+      );
+      const ragFingerprint =
+        savedSources && savedSources.length > 0
+          ? fingerprintString(JSON.stringify(savedSources))
+          : "none";
+      const toolsFingerprint = fingerprintString(
+        [...allowedToolNames].sort().join(","),
+      );
+      const dateFingerprint = new Date().toLocaleDateString("en-CA", {
+        timeZone: user.timezone,
+      });
+
+      cacheKey = buildCacheKey({
+        userId: userId.toString(),
+        normalizedPrompt: augmentedText,
+        dateFingerprint,
+        provider: env.LLM_PROVIDER,
+        model: harness.model,
+        reasoning: harness.reasoning,
+        maxTokens: harness.maxTokens,
+        personalityMode: user.personality?.mode ?? "auto",
+        personalityNote: user.personality?.note ?? "",
+        attachmentFingerprint,
+        historyFingerprint,
+        filesFingerprint,
+        ragFingerprint,
+        generationMode: generation?.mode ?? "auto",
+        toolsFingerprint,
+      });
+
+      const cached = await getCachedTurn(cacheKey);
+
+      if (cached) {
+        transition("GENERATING");
+
+        if (cached.sources && cached.sources.length > 0) {
+          sseSend("sources", { sources: cached.sources });
+        }
+        for (const block of cached.blocks) {
+          emitter.emitAtomic(block);
+        }
+
+        await saveAssistantMessage(
+          messageId,
+          sessionId,
+          userId,
+          cached.blocks,
+          "done",
+          {
+            ...(cached.usage !== undefined ? { usage: cached.usage } : {}),
+            ...(cached.sources !== undefined
+              ? { sources: cached.sources }
+              : {}),
+            ...(cached.toolCalls !== undefined
+              ? { toolCalls: cached.toolCalls }
+              : {}),
+          },
+        );
+
+        finalStatus = "done";
+        finalUsage = cached.usage;
+
+        void maybeSummarize(sessionId).catch((err: unknown) => {
+          logger.warn(
+            { err },
+            "maybeSummarize fire-and-forget failed (cache hit)",
+          );
+        });
+
+        transition("DONE");
+
+        return {
+          status: "done",
+          blocks: cached.blocks,
+          ...(cached.usage !== undefined ? { usage: cached.usage } : {}),
+        };
+      }
+    }
+
     transition("GENERATING");
 
     // ── Agent loop ──────────────────────────────────────────────────
@@ -457,7 +634,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     finalStatus = result.aborted ? "aborted" : result.error ? "error" : "done";
     finalUsage = result.usage;
     finalError = result.error;
-    if (result.error) finalErrorCode = "STREAM_ERROR";
+    if (result.error) finalErrorCode = result.errorCode ?? "STREAM_ERROR";
 
     await saveAssistantMessage(
       messageId,
@@ -472,10 +649,49 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       },
     );
 
+    // ── Prompt cache store (Phase 2) ───────────────────────────────
+    if (cacheKey && finalStatus === "done" && result.blocks.length > 0) {
+      await setCachedTurn(cacheKey, {
+        blocks: result.blocks,
+        ...(result.usage !== undefined ? { usage: result.usage } : {}),
+        ...(savedSources !== undefined ? { sources: savedSources } : {}),
+        ...(result.toolCalls.length > 0 ? { toolCalls: result.toolCalls } : {}),
+        createdAt: Date.now(),
+      });
+    }
+
     if (finalStatus === "done") {
       void maybeSummarize(sessionId).catch((err: unknown) => {
         logger.warn({ err }, "maybeSummarize fire-and-forget failed");
       });
+    }
+
+    // ── Phase 8: gradual style profile update (fire-and-forget) ────
+    if (finalStatus === "done") {
+      const recentUserTexts = history
+        .filter((m) => m.role === "user" && m.status === "done")
+        .slice(-10)
+        .map((m) => blocksToText(m.blocks));
+      recentUserTexts.push(text);
+
+      void (async () => {
+        try {
+          const prev =
+            (user.styleProfile as PersistedStyleProfile | undefined) ??
+            undefined;
+          const updated = computeStyleProfileUpdate({
+            recentUserTexts,
+            ...(prev !== undefined ? { persisted: prev } : {}),
+          });
+          if (updated.sampleCount === (prev?.sampleCount ?? -1)) return;
+          await UserModel.updateOne(
+            { _id: userId },
+            { $set: { styleProfile: updated } },
+          );
+        } catch (err) {
+          logger.warn({ err }, "style profile update failed");
+        }
+      })();
     }
 
     if (finalStatus === "done" && session.titleAuto) {
@@ -537,14 +753,17 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     }
 
     const code = err instanceof AppError ? err.code : "INTERNAL";
-    const message = err instanceof Error ? err.message : String(err);
+    const publicMessage =
+      err instanceof AppError
+        ? err.message
+        : "Terjadi kesalahan saat memproses permintaan.";
     logger.error(
       { err, sessionId: sessionId.toString() },
       "coordinator runTurn error",
     );
 
     finalStatus = signal.aborted ? "aborted" : "error";
-    finalError = message;
+    finalError = publicMessage;
     finalErrorCode = code;
 
     try {

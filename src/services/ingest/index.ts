@@ -8,7 +8,7 @@ import { logger } from "../../config/logger.js";
 import { extract } from "./extractors/index.js";
 import { chunkText } from "./chunker.js";
 import { chat } from "../llm/nvidiaClient.js";
-import { embedAndStoreChunks } from "./embedder.js";
+import { embedAndStoreChunks, EmbeddingError } from "./embedder.js";
 
 const CONCURRENCY = 3;
 
@@ -95,13 +95,27 @@ async function runEmbeddingForFile(
       { $set: { indexStatus: "indexing" } },
     );
     const result = await embedAndStoreChunks(chunks);
+    // Aborted dengan 0 embedded → biarkan "pending" agar di-resume startup
+    // berikutnya. Aborted dengan partial → "ready" (sebagian embedded,
+    // sisanya text-fallback). Gagal non-abort + 0 embedded → "failed".
     const finalStatus: FileIndexStatus =
-      result.embedded === 0 ? "failed" : "ready";
+      result.aborted && result.embedded === 0
+        ? "pending"
+        : result.embedded === 0
+          ? "failed"
+          : "ready";
     await FileDocModel.updateOne(
       { _id: fileId },
       { $set: { indexStatus: finalStatus } },
     );
   } catch (err) {
+    if (err instanceof EmbeddingError && err.aborted) {
+      logger.info(
+        { fileId: fileId.toString() },
+        "runEmbeddingForFile aborted; leaving indexStatus indexing for resume",
+      );
+      return;
+    }
     logger.warn(
       { err, fileId: fileId.toString() },
       "runEmbeddingForFile failed; marking as failed",
