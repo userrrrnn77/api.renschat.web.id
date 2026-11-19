@@ -12,7 +12,7 @@ import { logger } from "../../config/logger.js";
  * Phase 2 — Intelligent Prompt Cache (24h).
  * Bump CACHE_VERSION ketika format payload atau komposisi cache key berubah.
  */
-export const CACHE_VERSION = 1;
+export const CACHE_VERSION = 2;
 const KEY_PREFIX = "prompt_cache";
 
 export interface CacheKeyInput {

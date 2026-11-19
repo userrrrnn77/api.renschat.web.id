@@ -29,14 +29,21 @@ export class NvidiaProvider implements LlmProvider {
     );
 
     for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta;
-      if (!delta) continue;
+      const choice = chunk.choices[0];
+      const delta = choice?.delta;
+      const finishReason = choice?.finish_reason ?? null;
+
+      // Jangan skip kalau punya finishReason atau usage — chunk final
+      // sering tidak punya `delta` tapi justru membawa finish_reason
+      // (termasuk "length"). Skip hanya kalau benar-benar kosong.
+      if (!delta && !finishReason && !chunk.usage) continue;
+
       yield {
-        content: delta.content ?? undefined,
-        thinking: delta.reasoning_content ?? delta.reasoning ?? undefined,
-        toolCalls: delta.tool_calls,
+        content: delta?.content ?? undefined,
+        thinking: delta?.reasoning_content ?? delta?.reasoning ?? undefined,
+        toolCalls: delta?.tool_calls,
         usage: chunk.usage,
-        finishReason: chunk.choices[0]?.finish_reason ?? null,
+        finishReason,
       };
     }
   }

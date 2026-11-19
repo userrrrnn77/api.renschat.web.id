@@ -1,5 +1,7 @@
 // src/services/chat/responseSanitizer.ts
 
+import { logger } from "../../config/logger.js";
+
 interface SuppressBlock {
   open: string;
   close: string;
@@ -63,6 +65,18 @@ export class StreamingResponseSanitizer {
         const idx = lower.indexOf(this.suppressUntil);
         if (idx === -1) {
           if (final) {
+            if (this.buf.length > 0) {
+              // Jangan buang diam-diam: catat supaya kelihatan di log
+              // saat model kehabisan token di tengah tool-call XML.
+              logger.warn(
+                {
+                  discardingLen: this.buf.length,
+                  suppressUntil: this.suppressUntil,
+                  sample: this.buf.slice(0, 200),
+                },
+                "responseSanitizer: unclosed suppress block at finish()",
+              );
+            }
             this.buf = "";
             this.suppressUntil = null;
             return out;

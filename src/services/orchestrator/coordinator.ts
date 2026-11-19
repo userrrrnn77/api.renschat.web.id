@@ -50,6 +50,7 @@ import {
   classifyPromptComplexity,
   decideRetrieval,
 } from "../rag/promptComplexity.js";
+import { detectFileAction } from "../chat/fileIntent.js";
 
 const LEGAL: Record<Phase, Phase[]> = {
   IDLE: ["CLARIFYING", "RETRIEVING", "GENERATING", "DONE", "ABORTED", "ERROR"],
@@ -93,6 +94,7 @@ async function saveAssistantMessage(
     usage?: Usage;
     toolCalls?: Array<{ id: string; name: string; argsJson: string }>;
     sources?: SourcePayload[];
+    truncated?: boolean;
   } = {},
 ): Promise<void> {
   const text = blocks.map((b) => blocksToText([b])).join("");
@@ -106,6 +108,7 @@ async function saveAssistantMessage(
     status,
     ...(extras.usage !== undefined ? { usage: extras.usage } : {}),
     ...(extras.sources !== undefined ? { sources: extras.sources } : {}),
+    ...(extras.truncated ? { truncated: true } : {}),
     ...(extras.toolCalls !== undefined
       ? { llm: { toolCalls: extras.toolCalls } }
       : {}),
@@ -209,6 +212,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
   let finalErrorCode: string | undefined;
   let clarificationInfo: RunTurnResult["clarification"] | undefined;
   let savedSources: SourcePayload[] | undefined;
+  let wasTruncated = false;
 
   try {
     // ── Generation plan (§8): dihitung di server, bukan oleh model.
@@ -513,9 +517,10 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
 
     // ── Prompt cache lookup (Phase 2) ───────────────────────────────
     const isMediaGeneration = explicitMediaMode;
+    const fileAction = explicitMediaMode ? undefined : detectFileAction(text);
     let cacheKey: string | null = null;
 
-    if (env.PROMPT_CACHE_ENABLED && !isMediaGeneration) {
+    if (env.PROMPT_CACHE_ENABLED && !isMediaGeneration && !fileAction) {
       const historyFingerprint = fingerprintString(
         history
           .filter((m) => m.role !== "tool" && m.status !== "streaming")
@@ -611,11 +616,12 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     // ── Agent loop ──────────────────────────────────────────────────
     const result = await runAgent({
       messages,
+      ...(fileAction ? { fileAction } : {}),
       tools: buildToolDefinitions(plan.allowedMediaTools),
       userId,
       sessionId,
       messageId,
-      model: harness.model,
+      model: fileAction ? env.MODEL_MAIN : harness.model,
       reasoning: harness.reasoning,
       maxTokens: harness.maxTokens,
       emitter,
@@ -635,6 +641,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     finalUsage = result.usage;
     finalError = result.error;
     if (result.error) finalErrorCode = result.errorCode ?? "STREAM_ERROR";
+    wasTruncated = result.truncated === true;
 
     await saveAssistantMessage(
       messageId,
@@ -646,11 +653,17 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
         ...(result.usage !== undefined ? { usage: result.usage } : {}),
         ...(savedSources !== undefined ? { sources: savedSources } : {}),
         toolCalls: result.toolCalls,
+        ...(wasTruncated ? { truncated: true } : {}),
       },
     );
 
     // ── Prompt cache store (Phase 2) ───────────────────────────────
-    if (cacheKey && finalStatus === "done" && result.blocks.length > 0) {
+    if (
+      cacheKey &&
+      finalStatus === "done" &&
+      !wasTruncated &&
+      result.blocks.length > 0
+    ) {
       await setCachedTurn(cacheKey, {
         blocks: result.blocks,
         ...(result.usage !== undefined ? { usage: result.usage } : {}),
@@ -660,7 +673,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       });
     }
 
-    if (finalStatus === "done") {
+    if (finalStatus === "done" && !wasTruncated) {
       void maybeSummarize(sessionId).catch((err: unknown) => {
         logger.warn({ err }, "maybeSummarize fire-and-forget failed");
       });
@@ -733,6 +746,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       ...(clarificationInfo !== undefined
         ? { clarification: clarificationInfo }
         : {}),
+      ...(wasTruncated ? { truncated: true } : {}),
     };
   } catch (err) {
     try {
@@ -781,6 +795,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       ...(clarificationInfo !== undefined
         ? { clarification: clarificationInfo }
         : {}),
+      ...(wasTruncated ? { truncated: true } : {}),
     };
   }
 }

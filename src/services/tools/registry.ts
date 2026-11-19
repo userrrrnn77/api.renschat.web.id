@@ -65,11 +65,45 @@ export function listToolNames(): string[] {
 
 const MAX_TOOL_RESULT_LEN = 2048;
 
+/**
+ * Truncate tool result string, preserving JSON validity when possible.
+ * Naive `.slice(0, maxLen)` on a JSON string produces malformed JSON
+ * (`{"ok":true,"content":"...cut...`) which confuses the model on the
+ * next tool iteration. We try two recovery strategies:
+ *   1. Cut at the last complete `}` or `]` and validate with JSON.parse.
+ *   2. Wrap the preview in a valid `{ok:false, error:"RESULT_TRUNCATED"}`
+ *      envelope so the model still gets readable content.
+ */
 export function truncateResult(
   s: string,
   maxLen = MAX_TOOL_RESULT_LEN,
 ): string {
-  return s.length > maxLen ? s.slice(0, maxLen) : s;
+  if (s.length <= maxLen) return s;
+
+  // Strategy 1: cut at last complete JSON boundary
+  const sliced = s.slice(0, maxLen);
+  const lastClose = Math.max(sliced.lastIndexOf("}"), sliced.lastIndexOf("]"));
+  if (lastClose > maxLen * 0.5) {
+    const candidate = sliced.slice(0, lastClose + 1);
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      // not recoverable — fall through
+    }
+  }
+
+  // Strategy 2: wrap preview in valid JSON envelope
+  const envelope = {
+    ok: false,
+    error: "RESULT_TRUNCATED",
+    message: `Original length ${s.length} exceeds limit ${maxLen}`,
+    preview: sliced.slice(0, Math.max(0, maxLen - 140)),
+  };
+  const out = JSON.stringify(envelope);
+  // Defensive: if envelope itself exceeds maxLen (very small maxLen),
+  // do a hard slice as last resort.
+  return out.length <= maxLen ? out : out.slice(0, maxLen);
 }
 
 export function errorResult(

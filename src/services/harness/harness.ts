@@ -26,7 +26,7 @@ const HEAVY_VERBS =
 // §8.6: pesan yang menuntut media tidak boleh jatuh ke MODEL_FAST
 // (model fast lemah di tool calling).
 const MEDIA_KEYWORDS =
-  /gambar|foto|ilustrasi|image|video|animasi|klip|generate|buatkan/i;
+  /\b(gambar|foto|ilustrasi|image|images|video|videos|animasi|animation|klip)\b/i;
 
 const PY_VIDEO_EXTRA_TOKENS = 8_000;
 
@@ -85,18 +85,19 @@ export function classifyTurn(input: HarnessInput): HarnessDecision {
     /\b\d+[\+\-\*\/\^]\d+\b/.test(input.text);
 
   if (isComplex) {
-    const budget =
-      env.REASONING_DEFAULT === "low"
-        ? 1024
-        : env.REASONING_DEFAULT === "medium"
-          ? 4096
-          : 16384;
+    // reasoning="high" → 16384 thinking budget. maxTokens harus
+    // mengalokasikan thinking budget yang SAMA + headroom output.
+    // Sebelumnya budget diambil dari env.REASONING_DEFAULT (bisa "off"
+    // atau "low") padahal reasoning-nya dipaksa "high" → mismatch.
+    const HIGH_REASONING_BUDGET = 16384;
+    const HIGH_MIN_OUTPUT = 8192; // headroom untuk tool call / file panjang
     return {
       complexity: "complex",
       model: env.MODEL_MAIN,
       reasoning: "high",
       maxTokens: maxTokensWithMediaBudget(
-        env.MAX_OUTPUT_TOKENS + budget,
+        Math.max(env.MAX_OUTPUT_TOKENS, HIGH_MIN_OUTPUT) +
+          HIGH_REASONING_BUDGET,
         input,
       ),
     };

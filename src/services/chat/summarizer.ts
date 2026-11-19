@@ -2,6 +2,7 @@
 
 import { Types } from "mongoose";
 import { chat } from "../llm/nvidiaClient.js";
+import { mapReasoning } from "../llm/reasoningMap.js";
 import { env, SUMMARY_MODEL } from "../../config/env.js";
 import { logger } from "../../config/logger.js";
 import { SessionModel } from "../../models/Session.js";
@@ -42,12 +43,14 @@ async function callFastSummary(
   sessionId: string,
 ): Promise<string | null> {
   const t0 = Date.now();
+  const extra = mapReasoning("nvidia", SUMMARY_MODEL, "off");
   const res = await chat(
     {
       model: SUMMARY_MODEL,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.2,
       max_tokens: SUMMARY_MAX_OUTPUT_TOKENS,
+      ...(Object.keys(extra).length > 0 ? { extra } : {}),
     },
     undefined,
     SUMMARIZE_TIMEOUT_MS,

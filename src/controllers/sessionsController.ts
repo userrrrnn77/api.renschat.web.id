@@ -12,6 +12,8 @@ import { getUserId } from "../middleware/auth.js";
 import { parseObjectIdParam as parseSessionId } from "../utils/params.js";
 import { getStorage } from "../storage/index.js";
 import { logger } from "../config/logger.js";
+import { makePublicLineFilter } from "../services/chat/publicProse.js";
+import { listToolNames } from "../services/tools/registry.js";
 
 // ─── Schemas ───────────────────────────────────────────────────────────────
 
@@ -125,6 +127,8 @@ export async function getSession(req: Request, res: Response): Promise<void> {
   const nextCursor =
     hasMore && page[0]?.createdAt ? page[0].createdAt.toISOString() : null;
 
+  const publicLine = makePublicLineFilter(listToolNames());
+
   res.json({
     session: {
       ...serializeSession(session),
@@ -133,9 +137,23 @@ export async function getSession(req: Request, res: Response): Promise<void> {
     messages: page.map((m) => ({
       id: String(m._id),
       role: m.role,
-      blocks: m.blocks,
+      blocks:
+        m.role === "assistant"
+          ? m.blocks.flatMap((block): typeof m.blocks => {
+              if (block.type !== "text") return [block];
+
+              const markdown = block.markdown
+                .split("\n")
+                .map(publicLine)
+                .join("\n")
+                .trim();
+
+              return markdown ? [{ ...block, markdown }] : [];
+            })
+          : m.blocks,
       status: m.status,
       ...(m.sources !== undefined ? { sources: m.sources } : {}),
+      ...(m.truncated ? { truncated: true } : {}),
       createdAt: m.createdAt.toISOString(),
     })),
     nextCursor,

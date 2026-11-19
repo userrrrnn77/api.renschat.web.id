@@ -131,7 +131,7 @@ const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   ],
   allowedAttributes: {
     "*": ["style", "class"],
-    img: ["src/services", "alt", "width", "height"],
+    img: ["src", "alt", "width", "height"],
     th: ["colspan", "rowspan", "style"],
     td: ["colspan", "rowspan", "style"],
     col: ["span", "style"],

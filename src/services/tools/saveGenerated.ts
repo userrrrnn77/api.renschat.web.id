@@ -12,6 +12,7 @@ import { embedAndStoreChunks } from "../ingest/embedder.js";
 import { env } from "../../config/env.js";
 import { logger } from "../../config/logger.js";
 import { AppError } from "../../middleware/error.js";
+import type { FileAppearance } from "../blocks/fileAppearance.js";
 
 const CODE_EXTS = new Set([
   "ts",
@@ -107,6 +108,7 @@ export interface SaveGeneratedInput {
   name: string;
   mime: string;
   buf: Buffer;
+  appearance?: FileAppearance;
   summaryLine?: string;
   doChunk?: boolean;
 }
@@ -152,6 +154,7 @@ export async function saveGenerated(
     mime: input.mime,
     size: input.buf.length,
     sha256: sha256Hex(input.buf),
+    ...(input.appearance ? { appearance: input.appearance } : {}),
     version: nextVersion,
     parentFileId: parentId,
     storage: ref,

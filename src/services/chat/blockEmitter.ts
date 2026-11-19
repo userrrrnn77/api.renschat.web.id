@@ -40,6 +40,15 @@ export class BlockEmitter {
   }
 
   emitAtomic(block: Block): void {
+    if (block.type === "file") {
+      const alreadyVisible = this.accum.some(
+        (existing) =>
+          existing.type === "file" && existing.fileId === block.fileId,
+      );
+
+      if (alreadyVisible) return;
+    }
+
     const idx = this.start(block);
     this.end(idx, block);
   }

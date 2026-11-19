@@ -1,6 +1,7 @@
 // src/services/blocks/schemas.ts
 
 import { z } from "zod";
+import { FileAppearanceSchema } from "./fileAppearance.js";
 
 const Cell = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
@@ -24,6 +25,7 @@ export const FileBlock = z.object({
   size: z.number(),
   version: z.number().default(1),
   preview: z.enum(["code", "text", "image", "pdf", "none"]),
+  appearance: FileAppearanceSchema.optional(),
   note: z.string().optional(),
 });
 

@@ -406,8 +406,15 @@ export async function getFileContent(
     throw new AppError("UPLOAD_INCOMPLETE", 425, "File not uploaded yet");
   }
 
+  assertNotExpired(doc);
+
   if (!isTextish(doc.mime, doc.name)) {
     throw new AppError("NOT_TEXT", 415, "File is binary; use /download");
+  }
+
+  if (doc.size === 0) {
+    res.json({ text: "", truncated: false, size: 0 });
+    return;
   }
 
   const storage = getStorage();

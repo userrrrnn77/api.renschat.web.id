@@ -49,10 +49,9 @@ export interface RunTurnResult {
   status: "done" | "aborted" | "error";
   blocks: Block[];
   usage?: Usage;
-  /** Pesan error untuk SSE `error` event (bila status=error). */
   error?: string;
-  /** Kode error untuk SSE (e.g. BAD_REQUEST, STREAM_ERROR). */
   errorCode?: string;
+  truncated?: boolean;
   clarification?: {
     questionId: string;
     question: string;

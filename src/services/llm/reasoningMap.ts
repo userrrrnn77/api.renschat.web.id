@@ -6,16 +6,22 @@ export function mapReasoning(
   model: string,
   effort: ReasoningEffort,
 ): Record<string, unknown> {
-  if (effort === "off") return {};
-
   if (provider === "nvidia") {
-    // ASUMSI: field ini wajib diverifikasi dengan scripts/probe.ts
+    // Nemotron reasoning models default to enable_thinking=true even
+    // without explicit chat_template_kwargs. Returning {} for "off" is
+    // NOT sufficient — model keeps reasoning and burns the entire
+    // max_tokens budget on reasoning_content (contentLen=0).
+    if (effort === "off") {
+      return { chat_template_kwargs: { enable_thinking: false } };
+    }
     const budget = effort === "low" ? 1024 : effort === "medium" ? 4096 : 16384;
     return {
       chat_template_kwargs: { enable_thinking: true },
       reasoning_budget: budget,
     };
   }
+
+  if (effort === "off") return {};
 
   if (provider === "openai_compat") {
     if (model.match(/^o[1-9]/) || model.startsWith("gpt-5")) {

@@ -116,7 +116,7 @@ const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3; // percobaan pertama + 2 retry
 const RETRY_BASE_MS = 500;
 const FIRST_TOKEN_TIMEOUT_MS = 60_000;
-const IDLE_TIMEOUT_MS = 60_000;
+const IDLE_TIMEOUT_MS = 120_000;
 
 function isRetriable(err: unknown): boolean {
   return err instanceof UpstreamError && RETRY_STATUS.has(err.status);
@@ -296,6 +296,17 @@ export async function* chatStream(
                 "skip malformed SSE chunk",
               );
               continue;
+            }
+            if (parsed.choices?.[0]?.finish_reason) {
+              logger.info(
+                {
+                  finish_reason: parsed.choices[0].finish_reason,
+                  hasDelta: Boolean(parsed.choices[0].delta),
+                  hasUsage: Boolean(parsed.usage),
+                  completion_tokens: parsed.usage?.completion_tokens,
+                },
+                "[diag] stream final chunk",
+              );
             }
             yield parsed;
           }

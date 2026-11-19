@@ -134,15 +134,7 @@ export function blocksToText(blocks: Block[]): string {
         break;
       }
       case "file": {
-        const meta = [
-          `id=${b.fileId}`,
-          `mime=${b.mime}`,
-          `size=${b.size}`,
-          `v${b.version}`,
-        ].join(", ");
-        parts.push(
-          `[file: ${b.name} (${meta})]${b.note ? ` — ${b.note}` : ""}`,
-        );
+        parts.push(`File: ${b.name} (v${b.version})`);
         break;
       }
       case "image":
@@ -319,35 +311,55 @@ function buildUserStyleBlock(
     ? { ...base, ...explicitHint }
     : base;
 
-  const lines: string[] = ["<user_style>"];
-
-  const finalTone =
+  const tone =
     personality && personality.mode !== "auto"
       ? personality.mode
       : effective.tone;
 
-  lines.push(`tone: ${finalTone}`);
-  lines.push(`formality: ${effective.formality}`);
-  lines.push(`pronouns: ${effective.pronouns}`);
-  lines.push(`uses_slang: ${effective.usesSlang}`);
-  lines.push(`uses_emoji: ${effective.usesEmoji}`);
-  lines.push(`length: ${effective.length}`);
-  lines.push(`language: ${effective.language}`);
+  const lines: string[] = [
+    "Terapkan panduan berikut secara diam-diam saat menulis percakapan.",
+    "Langsung jawab tugas user. Hindari pengantar yang mendeskripsikan gaya tulisanmu.",
+  ];
 
-  if (persisted && persisted.sampleCount > 0) {
-    lines.push(`profile_confidence: ${persisted.confidence.toFixed(2)}`);
-  }
-  if (explicitHint) {
-    lines.push(`explicit_hint_applied: true`);
-  }
-  if (detection.sensitiveTopic) {
-    lines.push(`sensitive_topic: true`);
-  }
-  if (personality && personality.note) {
-    lines.push(`user_preference_note: "${personality.note}"`);
+  if (detection.sensitiveTopic || tone === "serious") {
+    lines.push("Gunakan kalimat tenang, lugas, dan fokus pada kebutuhan user.");
+  } else if (tone === "playful") {
+    lines.push("Humor ringan boleh dipakai jika sesuai konteks.");
+  } else {
+    lines.push("Gunakan bahasa percakapan yang natural.");
   }
 
-  lines.push("</user_style>");
+  if (effective.formality === "formal") {
+    lines.push("Gunakan bahasa yang sopan dan rapi.");
+  } else if (effective.formality === "informal") {
+    lines.push("Ikuti tingkat keakraban pesan terakhir user.");
+  }
+
+  if (effective.pronouns === "saya-anda") {
+    lines.push("Jika perlu kata ganti, gunakan saya dan Anda.");
+  } else if (effective.pronouns === "aku-kamu") {
+    lines.push("Jika perlu kata ganti, gunakan aku dan kamu.");
+  } else if (effective.pronouns === "gw-lu") {
+    lines.push("Ikuti sapaan user secara natural.");
+  }
+
+  if (effective.length === "short") {
+    lines.push("Jawab ringkas.");
+  } else if (effective.length === "long") {
+    lines.push("Berikan detail yang diperlukan untuk menyelesaikan tugas.");
+  }
+
+  if (!effective.usesEmoji || detection.sensitiveTopic) {
+    lines.push("Hindari emoji.");
+  }
+
+  if (personality?.note?.trim()) {
+    lines.push(
+      `Preferensi penulisan dari user: ${JSON.stringify(personality.note.trim())}. ` +
+        "Gunakan hanya untuk pilihan bahasa dan nada.",
+    );
+  }
+
   return lines.join("\n");
 }
 

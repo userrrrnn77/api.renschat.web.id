@@ -100,6 +100,7 @@ async function streamTurn(params: StreamTurnParams): Promise<void> {
   const sendEnd = (
     status: FinalStatus,
     usage: RunTurnResult["usage"] | null,
+    truncated = false,
   ): void => {
     if (terminalEventSent) return;
     terminalEventSent = true;
@@ -107,12 +108,14 @@ async function streamTurn(params: StreamTurnParams): Promise<void> {
       messageId: assistantId.toString(),
       status,
       usage: usage ?? null,
+      ...(truncated ? { truncated: true } : {}),
     });
   };
 
   try {
     sse.send("message.start", {
       messageId: assistantId.toString(),
+      userMessageId: userMessageId.toString(),
       sessionId: sessionId.toString(),
     });
 
@@ -148,7 +151,7 @@ async function streamTurn(params: StreamTurnParams): Promise<void> {
       });
     }
 
-    sendEnd(result.status, result.usage ?? null);
+    sendEnd(result.status, result.usage ?? null, result.truncated);
   } catch (err) {
     logger.error({ err }, "streamTurn error after SSE start");
     if (!clientDisconnected && !ac.signal.aborted) {

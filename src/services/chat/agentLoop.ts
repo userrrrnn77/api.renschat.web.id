@@ -33,6 +33,8 @@ import type { GenerationPlan } from "../generation/plan.js";
 import { getProvider, type ReasoningEffort } from "../llm/provider.js";
 import { classifyProviderError } from "../llm/errorClassify.js";
 import { createThinkingForwarder } from "./thinkingStream.js";
+import { makePublicLineFilter } from "./publicProse.js";
+import type { FileAction } from "./fileIntent.js";
 
 export interface AgentCallbacks {
   onToolStart: (callId: string, name: string) => void;
@@ -57,6 +59,7 @@ export interface AgentInput {
   /** Plan generation turn ini; diteruskan ke ToolContext. */
   generation: GenerationPlan;
   askClarification?: (q: ClarificationQuestion) => Promise<string[]>;
+  fileAction?: FileAction;
 }
 
 export interface AgentResult {
@@ -64,6 +67,7 @@ export interface AgentResult {
   toolCalls: Array<{ id: string; name: string; argsJson: string }>;
   usage?: Usage;
   aborted: boolean;
+  truncated: boolean;
   error?: string;
   /** Kode error publik (PROVIDER_ERROR, RATE_LIMITED, dst). */
   errorCode?: string;
@@ -111,6 +115,7 @@ async function executeWithRepair(
   tool: ToolDef,
   argsStr: string,
   ctx: ToolContext,
+  fileAction?: FileAction,
 ): Promise<ToolResult> {
   // Tidak ada retry args yang sama: kalau tool.run side-effect (R2/DB)
   // sukses tapi langkah berikutnya gagal, retry bikin orphan. Model
@@ -125,6 +130,16 @@ async function executeWithRepair(
     );
   }
   try {
+    if (
+      fileAction === "create_file" &&
+      tool.name === "create_file" &&
+      parsed !== null &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed)
+    ) {
+      return await tool.run({ ...parsed, present: true }, ctx);
+    }
+
     return await tool.run(parsed, ctx);
   } catch (err) {
     // Error klarifikasi harus propagate ke agentLoop (bukan diubah jadi
@@ -153,11 +168,18 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   let aborted = false;
   let error: string | undefined;
   let errorCode: string | undefined;
+  let truncated = false;
   let endTurnByChoices = false;
   let natural = false;
 
   const workingMessages: ChatMessage[] = [...input.messages];
-  let currentTools = input.tools;
+  let currentTools = input.fileAction
+    ? input.tools.filter((tool) => tool.function.name === input.fileAction)
+    : input.tools;
+
+  const fileBlockCountAtStart = emitter.blocks.filter(
+    (block) => block.type === "file",
+  ).length;
 
   const provider = getProvider();
 
@@ -171,18 +193,73 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     // pernah mencapai parser → emitter → SSE → TextBlock.
     const sanitizer = new StreamingResponseSanitizer();
 
+    const publicLine = makePublicLineFilter(listToolNames());
+
+    let inText = false;
+    let textStarted = false;
+    let pendingLine = "";
+    let visibleText = "";
+
+    function publishLine(index: number, raw: string) {
+      const cleaned = publicLine(raw);
+      if (!cleaned) return;
+
+      // Simpan whitespace antarbait, tapi jangan buka bubble untuk baris kosong.
+      if (!textStarted && !cleaned.trim()) return;
+
+      if (!textStarted) {
+        emitter.start({ type: "text", markdown: "" });
+        textStarted = true;
+      }
+
+      visibleText += cleaned;
+      emitter.delta(index, cleaned);
+    }
+
     const parser = new FenceParser({
-      start: (_i, block) => emitter.start(block),
-      delta: (i, delta) => emitter.delta(i, delta),
-      end: (i, block) => {
-        if (block.type === "text") {
-          emitter.end(i, {
-            type: "text",
-            markdown: sanitizeFinalText(block.markdown),
-          });
+      start: (_index, block) => {
+        inText = block.type === "text";
+
+        if (inText) {
+          textStarted = false;
+          pendingLine = "";
+          visibleText = "";
+        } else {
+          emitter.start(block);
+        }
+      },
+
+      delta: (index, delta) => {
+        if (!inText) {
+          emitter.delta(index, delta);
           return;
         }
-        emitter.end(i, block);
+
+        const lines = (pendingLine + delta).split("\n");
+        pendingLine = lines.pop() ?? "";
+
+        for (const line of lines) {
+          publishLine(index, `${line}\n`);
+        }
+      },
+
+      end: (index, block) => {
+        if (block.type !== "text") {
+          emitter.end(index, block);
+          return;
+        }
+
+        if (pendingLine) publishLine(index, pendingLine);
+
+        if (textStarted) {
+          emitter.end(index, {
+            type: "text",
+            markdown: sanitizeFinalText(visibleText),
+          });
+        }
+
+        inText = false;
+        pendingLine = "";
       },
     });
 
@@ -195,13 +272,22 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     let iterErrorCode: string | undefined;
     let iterContent = "";
     let firstContentOrToolSeen = false;
+    let iterFinishReason: string | null = null;
 
     try {
       const stream = provider.streamCompletion({
         model: input.model,
         messages: workingMessages,
         ...(currentTools.length > 0
-          ? { tools: currentTools, toolChoice: "auto" as const }
+          ? {
+              tools: currentTools,
+              toolChoice: input.fileAction
+                ? {
+                    type: "function" as const,
+                    function: { name: input.fileAction },
+                  }
+                : ("auto" as const),
+            }
           : {}),
         maxTokens: input.maxTokens,
         reasoning: input.reasoning,
@@ -214,11 +300,11 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           break;
         }
 
-        if (chunk.thinking && !firstContentOrToolSeen) {
+        if (chunk.thinking && !input.fileAction && !firstContentOrToolSeen) {
           thinking.push(chunk.thinking);
         }
 
-        if (chunk.content) {
+        if (chunk.content && !input.fileAction) {
           if (!firstContentOrToolSeen) {
             firstContentOrToolSeen = true;
             thinking.end();
@@ -239,6 +325,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         }
 
         if (chunk.usage) usage = chunk.usage;
+        if (chunk.finishReason) iterFinishReason = chunk.finishReason;
       }
     } catch (err) {
       if (input.signal.aborted) aborted = true;
@@ -266,6 +353,17 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     }
     parser.finish();
 
+    logger.debug(
+      {
+        iter,
+        finishReason: iterFinishReason,
+        completionTokens: usage?.completion_tokens,
+        callsCount: finalize(toolCallAcc).length,
+        contentLen: iterContent.length,
+      },
+      "[diag] iteration end",
+    );
+
     if (aborted) break;
     if (iterError) {
       error = iterError;
@@ -274,8 +372,84 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     }
 
     const calls = finalize(toolCallAcc);
+
+    if (iterFinishReason === "length") {
+      const invalidArgsCount = calls.reduce((n, c) => {
+        try {
+          JSON.parse(c.args || "{}");
+          return n;
+        } catch {
+          return n + 1;
+        }
+      }, 0);
+
+      logger.warn(
+        {
+          iter,
+          finishReason: iterFinishReason,
+          completionTokens: usage?.completion_tokens,
+          promptTokens: usage?.prompt_tokens,
+          totalToolCalls: calls.length,
+          invalidArgsCalls: invalidArgsCount,
+          textLen: iterContent.length,
+          sessionId: input.sessionId.toString(),
+          model: input.model,
+          maxTokens: input.maxTokens,
+        },
+        "output truncated by max_tokens (finish_reason=length)",
+      );
+
+      const hasPartialAnswer = emitter.blocks.some((block) => {
+        if (block.type === "text") return block.markdown.trim().length > 0;
+        if (block.type === "code") return block.content.trim().length > 0;
+        return true;
+      });
+
+      let notice = "Jawaban terpotong karena mencapai batas token output.";
+
+      if (calls.length > 0) {
+        notice =
+          "Batas token tercapai saat menyusun permintaan tool. Operasi terakhir belum dijalankan.";
+      } else if (!hasPartialAnswer) {
+        notice =
+          "Batas token tercapai sebelum jawaban bisa ditampilkan. Coba pecah permintaan menjadi bagian yang lebih kecil.";
+      }
+
+      truncated = true;
+
+      if (calls.length > 0 || !hasPartialAnswer) {
+        error = notice;
+        errorCode = "OUTPUT_TRUNCATED";
+      }
+
+      emitter.emitAtomic({
+        type: "text",
+        markdown: `_⚠️ ${notice}_`,
+      });
+
+      break;
+    }
+
     if (calls.length === 0) {
-      natural = true;
+      if (input.fileAction) {
+        errorCode = "FILE_ACTION_INCOMPLETE";
+        error =
+          input.fileAction === "create_file"
+            ? "File belum berhasil dibuat. Silakan coba lagi."
+            : "File belum berhasil ditampilkan. Coba sebutkan nama filenya.";
+      } else {
+        natural = true;
+      }
+
+      break;
+    }
+
+    if (
+      input.fileAction &&
+      calls.some((call) => call.name !== input.fileAction)
+    ) {
+      errorCode = "FILE_ACTION_INCOMPLETE";
+      error = "Permintaan file belum berhasil diproses. Silakan coba lagi.";
       break;
     }
 
@@ -290,6 +464,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     });
 
     let shouldBreak = false;
+    let fileActionFailed = false;
 
     for (const call of calls) {
       if (input.signal.aborted) {
@@ -326,17 +501,22 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             { available: listToolNames() },
           );
         } else {
-          toolResult = await executeWithRepair(tool, call.args, {
-            userId: input.userId,
-            sessionId: input.sessionId,
-            messageId: input.messageId,
-            abortSignal: input.signal,
-            emit: input.sseSend,
-            emitBlock: (b) => emitter.emitAtomic(b),
-            iteration: iter,
-            generation: input.generation,
-            askClarification: input.askClarification,
-          });
+          toolResult = await executeWithRepair(
+            tool,
+            call.args,
+            {
+              userId: input.userId,
+              sessionId: input.sessionId,
+              messageId: input.messageId,
+              abortSignal: input.signal,
+              emit: input.sseSend,
+              emitBlock: (b) => emitter.emitAtomic(b),
+              iteration: iter,
+              generation: input.generation,
+              askClarification: input.askClarification,
+            },
+            input.fileAction,
+          );
         }
       } catch (err) {
         if (err instanceof ClarificationTimeoutError) {
@@ -362,6 +542,10 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         input.callbacks.onToolEnd(call.id, false, "aborted");
         aborted = true;
         break;
+      }
+
+      if (input.fileAction && !toolResult.ok) {
+        fileActionFailed = true;
       }
 
       input.callbacks.onToolEnd(
@@ -399,13 +583,35 @@ Balas user dengan sopan, jelaskan secara singkat dalam bahasa manusia bahwa oper
     }
 
     if (aborted) break;
+
+    if (input.fileAction) {
+      const fileBlockCount = emitter.blocks.filter(
+        (block) => block.type === "file",
+      ).length;
+
+      const presented = fileBlockCount > fileBlockCountAtStart;
+
+      if (presented && !fileActionFailed) {
+        natural = true;
+      } else {
+        errorCode = "FILE_ACTION_INCOMPLETE";
+        error = presented
+          ? "Sebagian file sudah tersedia. Ada file lain yang belum berhasil diproses."
+          : input.fileAction === "create_file"
+            ? "File belum berhasil dibuat. Silakan coba lagi."
+            : "File belum tersedia untuk ditampilkan. Coba sebutkan nama file yang dimaksud.";
+      }
+
+      break;
+    }
+
     if (shouldBreak) {
       natural = true;
       break;
     }
   }
 
-  if (!natural && !aborted && !error) {
+  if (!natural && !aborted && !error && !truncated) {
     emitter.emitAtomic({
       type: "text",
       markdown: "_Aku mencapai batas langkah, ini hasil sejauh ini._",
@@ -417,6 +623,7 @@ Balas user dengan sopan, jelaskan secara singkat dalam bahasa manusia bahwa oper
     toolCalls: accumulatedToolCalls,
     ...(usage !== undefined ? { usage } : {}),
     aborted,
+    truncated,
     ...(error !== undefined ? { error } : {}),
     ...(errorCode !== undefined ? { errorCode } : {}),
     endTurnByChoices,

@@ -1,5 +1,6 @@
 // src/models/FileDoc.ts
 import mongoose, { Schema, Types, type Model } from "mongoose";
+import type { FileAppearance } from "../services/blocks/fileAppearance.js";
 
 export type FileOrigin = "upload" | "generated";
 export type FileStatus = "pending" | "processing" | "ready" | "failed";
@@ -52,6 +53,7 @@ export interface IFileDoc {
   mime: string;
   size: number;
   sha256: string;
+  appearance?: FileAppearance;
   version: number;
   parentFileId?: Types.ObjectId | null;
   storage: IFileDocStorage;
@@ -130,6 +132,16 @@ const fileDocSchema = new Schema<IFileDoc>(
     mime: { type: String, required: true },
     size: { type: Number, required: true },
     sha256: { type: String, default: "" },
+    appearance: {
+      type: new Schema(
+        {
+          icon: String,
+          accent: String,
+        },
+        { _id: false },
+      ),
+      default: undefined,
+    },
     version: { type: Number, default: 1 },
     parentFileId: { type: Types.ObjectId, ref: "FileDoc", default: null },
     storage: { type: storageSchema, required: true },

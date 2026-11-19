@@ -37,7 +37,7 @@ function setAuthCookie(res: Response, token: string): void {
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
     secure: env.NODE_ENV === "production",
-    sameSite: "none",
+    sameSite: env.NODE_ENV === "production" ? "none" : "lax",
     maxAge: COOKIE_MAX_AGE_MS,
     path: "/",
   });
@@ -127,7 +127,7 @@ export async function googleStart(_req: Request, res: Response): Promise<void> {
   res.cookie(STATE_COOKIE, stateToken, {
     httpOnly: true,
     secure: env.NODE_ENV === "production",
-    sameSite: "none",
+    sameSite: env.NODE_ENV === "production" ? "none" : "lax",
     maxAge: 10 * 60 * 1000,
     path: "/api/auth/google",
   });
