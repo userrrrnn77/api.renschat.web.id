@@ -19,8 +19,20 @@ import "./terminal/commands/pdf_info.js";
 import "./terminal/commands/list_files.js";
 
 function buildDescription(): string {
-  const lines = listCommands().map((c) => `- ${c.name}: ${c.description}`);
-  return `Jalankan command terbatas (safelist). Tidak ada shell, tidak ada akses jaringan. Hanya command di bawah yang diizinkan:\n${lines.join("\n")}\n\nJika user minta perintah shell (rm, ls, curl, apt, dsb), tolak dengan sopan dan tawarkan command yang tersedia.`;
+  const commands = listCommands().map(
+    (command) => `- ${command.name}: ${command.description}`,
+  );
+
+  return [
+    "Jalankan satu command dari registry dengan parameter command dan args.",
+    "Gunakan saat user meminta eksekusi command yang tersedia.",
+    'Contoh pemanggilan: {"command":"calc","args":{"expression":"12 * 8"}}.',
+    "Gunakan hasil tool pada turn ini untuk melaporkan hasil eksekusi.",
+    "Jika tool gagal, sampaikan kegagalannya. Jangan memberi hasil perkiraan sebagai hasil eksekusi.",
+    "Untuk permintaan penjelasan atau contoh sintaks saja, jawab sesuai pertanyaan.",
+    "Runner hanya menerima command berikut dan tidak menyediakan shell atau akses jaringan:",
+    ...commands,
+  ].join("\n");
 }
 
 const RunCommandSchema = z.object({

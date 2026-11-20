@@ -14,7 +14,7 @@ import { logger } from "./config/logger.js";
 import { AppError } from "./middleware/error.js";
 import indexRoutes from "./routes/index.js";
 import { internalRouter } from "./routes/internal.js";
-import { kofiWebhookRouter } from "./routes/kofiWebhook.js";
+
 import path from "node:path";
 
 export function buildApp(): express.Express {
@@ -48,7 +48,7 @@ export function buildApp(): express.Express {
   // requireAuth maupun globalLimiter milik indexRoutes. Hanya route ini
   // yang memakai express.urlencoded; parser JSON global tidak diubah
   // (content-type urlencoded tidak disentuh oleh express.json).
-  app.use("/api/webhooks", kofiWebhookRouter);
+
 
   app.use("/api", indexRoutes);
 

@@ -14,7 +14,8 @@ import {
   estimateTokens,
 } from "../chat/contextBuilder.js";
 import { generateTitle } from "../chat/titler.js";
-import { buildToolDefinitions, listTools } from "../tools/index.js";
+import { buildToolDefinitions, getTool, listTools } from "../tools/index.js";
+import { createAspectResolver } from "../generation/mediaAspect.js";
 import { resolveGenerationPlan } from "../generation/plan.js";
 import { maybeSummarize } from "../chat/summarizer.js";
 import { checkSafety } from "../safety/guard.js";
@@ -50,7 +51,8 @@ import {
   classifyPromptComplexity,
   decideRetrieval,
 } from "../rag/promptComplexity.js";
-import { detectFileAction } from "../chat/fileIntent.js";
+import { detectFileAction, detectTerminalIntent } from "../chat/fileIntent.js";
+import { listCommandNames } from "../tools/terminal/registry.js";
 
 const LEGAL: Record<Phase, Phase[]> = {
   IDLE: ["CLARIFYING", "RETRIEVING", "GENERATING", "DONE", "ABORTED", "ERROR"],
@@ -95,6 +97,7 @@ async function saveAssistantMessage(
     toolCalls?: Array<{ id: string; name: string; argsJson: string }>;
     sources?: SourcePayload[];
     truncated?: boolean;
+    errorCode?: string;
   } = {},
 ): Promise<void> {
   const text = blocks.map((b) => blocksToText([b])).join("");
@@ -109,6 +112,7 @@ async function saveAssistantMessage(
     ...(extras.usage !== undefined ? { usage: extras.usage } : {}),
     ...(extras.sources !== undefined ? { sources: extras.sources } : {}),
     ...(extras.truncated ? { truncated: true } : {}),
+    ...(extras.errorCode ? { errorCode: extras.errorCode } : {}),
     ...(extras.toolCalls !== undefined
       ? { llm: { toolCalls: extras.toolCalls } }
       : {}),
@@ -216,7 +220,21 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
 
   try {
     // ── Generation plan (§8): dihitung di server, bukan oleh model.
-    const plan = await resolveGenerationPlan(user, generation);
+    const attachedIds = attachmentIds.map(String);
+    const imageIdsInSession = new Set(
+      files
+        .filter(
+          (file) =>
+            String(file.userId) === String(userId) &&
+            file.mime.startsWith("image/"),
+        )
+        .map((file) => String(file._id)),
+    );
+
+    const plan = resolveGenerationPlan(
+      generation,
+      attachedIds.filter((id) => imageIdsInSession.has(id)),
+    );
     const allowedToolNames = listTools()
       .filter((t) => t.kind !== "media" || plan.allowedMediaTools.has(t.name))
       .map((t) => t.name);
@@ -311,8 +329,16 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
 
     // ── Clarification detection ─────────────────────────────────────
     let augmentedText = text;
+    const mediaNoun =
+      /\b(gambar|foto|poster|ilustrasi|logo|video|animasi|klip|image|picture|photo|illustration|clip|animation)\b/i;
+    const mediaAction =
+      /\b(buat(?:kan|in)?|bikin(?:kan|in)?|gambarkan|animasikan|edit|ubah|gabung(?:kan|in)?|generate|draw|create|animate|combine)\b/i;
+
     const explicitMediaMode =
-      generation?.mode === "image" || generation?.mode === "video";
+      plan.mode === "image" ||
+      plan.mode === "video" ||
+      (mediaAction.test(text) &&
+        (mediaNoun.test(text) || plan.referenceImageIds.length > 0));
     const question = explicitMediaMode
       ? null
       : detectClarification({
@@ -518,9 +544,22 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     // ── Prompt cache lookup (Phase 2) ───────────────────────────────
     const isMediaGeneration = explicitMediaMode;
     const fileAction = explicitMediaMode ? undefined : detectFileAction(text);
+
+    const terminalIntent =
+      !explicitMediaMode &&
+      !fileAction &&
+      allowedToolNames.includes("run_command")
+        ? detectTerminalIntent(text, listCommandNames())
+        : undefined;
+
     let cacheKey: string | null = null;
 
-    if (env.PROMPT_CACHE_ENABLED && !isMediaGeneration && !fileAction) {
+    if (
+      env.PROMPT_CACHE_ENABLED &&
+      !isMediaGeneration &&
+      !fileAction &&
+      !terminalIntent
+    ) {
       const historyFingerprint = fingerprintString(
         history
           .filter((m) => m.role !== "tool" && m.status !== "streaming")
@@ -564,7 +603,15 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
 
       const cached = await getCachedTurn(cacheKey);
 
-      if (cached) {
+      if (
+        cached &&
+        !cached.toolCalls?.some(
+          (call) => getTool(call.name)?.kind === "media",
+        ) &&
+        !cached.blocks.some(
+          (block) => block.type === "image" || block.type === "video",
+        )
+      ) {
         transition("GENERATING");
 
         if (cached.sources && cached.sources.length > 0) {
@@ -617,11 +664,12 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     const result = await runAgent({
       messages,
       ...(fileAction ? { fileAction } : {}),
+      ...(terminalIntent ? { terminalIntent } : {}),
       tools: buildToolDefinitions(plan.allowedMediaTools),
       userId,
       sessionId,
       messageId,
-      model: fileAction ? env.MODEL_MAIN : harness.model,
+      model: fileAction || explicitMediaMode ? env.MODEL_MAIN : harness.model,
       reasoning: harness.reasoning,
       maxTokens: harness.maxTokens,
       emitter,
@@ -634,6 +682,12 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       signal,
       allowedTools: plan.allowedMediaTools,
       generation: plan,
+      resolveMediaAspect: createAspectResolver(
+        text,
+        generation?.video?.aspect,
+        history,
+        (q) => askClarification(q, "GENERATING"),
+      ),
       askClarification: (q) => askClarification(q, "GENERATING"),
     });
 
@@ -653,6 +707,9 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
         ...(result.usage !== undefined ? { usage: result.usage } : {}),
         ...(savedSources !== undefined ? { sources: savedSources } : {}),
         toolCalls: result.toolCalls,
+        ...(finalStatus === "error" && finalErrorCode?.startsWith("COMMAND_")
+          ? { errorCode: finalErrorCode }
+          : {}),
         ...(wasTruncated ? { truncated: true } : {}),
       },
     );
@@ -662,6 +719,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       cacheKey &&
       finalStatus === "done" &&
       !wasTruncated &&
+      !result.toolCalls.some((call) => getTool(call.name)?.kind === "media") &&
       result.blocks.length > 0
     ) {
       await setCachedTurn(cacheKey, {

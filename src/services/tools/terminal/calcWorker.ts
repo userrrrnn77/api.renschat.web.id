@@ -49,9 +49,9 @@ self.onmessage = (e: MessageEvent<WorkerInput>): void => {
     }
     reply.ok = true;
     reply.result = out;
-  } catch (err) {
+  } catch {
     reply.ok = false;
-    reply.error = err instanceof Error ? err.message : String(err);
+    reply.error = "INVALID_EXPRESSION";
   }
   self.postMessage(reply);
 };

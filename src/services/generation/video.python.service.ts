@@ -297,6 +297,18 @@ export async function runPythonVideoJob(
       const tail =
         `only ${sandbox.framesProduced}/${totalFrames} frames produced (min ${minFrames}).\n` +
         sandbox.stderr;
+      logger.warn(
+        {
+          jobId,
+          framesProduced: sandbox.framesProduced,
+          expectedFrames: totalFrames,
+          minFrames,
+          timeoutKilled: sandbox.timeoutKilled,
+          stderrTail: sandbox.stderr.slice(-1500),
+        },
+        "Python renderer produced too few frames",
+      );
+
       await markFailed("FRAMES_INSUFFICIENT", "Not enough frames produced");
       logger.info(
         {

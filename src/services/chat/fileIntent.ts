@@ -1,6 +1,6 @@
 export type FileAction = "create_file" | "present_files";
 
-export function detectFileAction(rawText: string): FileAction | undefined {
+function readInstruction(rawText: string): string {
   // Format dari encoder paste/reply RensChat. Hanya baca instruksi user,
   // supaya kata "create_file" di dalam kode yang ditempel tidak memicu tool.
   let instruction = rawText;
@@ -15,10 +15,33 @@ export function detectFileAction(rawText: string): FileAction | undefined {
 
   // Batasi ke perintah langsung. Pertanyaan seperti
   // "kenapa app.tsx gagal dibuat?" tetap masuk chat biasa.
-  const command = text.replace(
+  return text.replace(
     /^(?:(?:oke|ok|nah|bre|please|tolong|coba|lu|kamu|bisa|bantu|gw minta)[\s,]+)+/i,
     "",
   );
+}
+
+export function detectTerminalIntent(
+  rawText: string,
+  commandNames: readonly string[],
+): string | undefined {
+  const instruction = readInstruction(rawText);
+
+  const match =
+    /^(?:jalankan|jalanin|eksekusi|run|execute)\s+(?:(?:tool|command|perintah)\s+)?`?([a-z][a-z0-9_]*)`?(?=$|[\s,:.!?])/i.exec(
+      instruction,
+    );
+
+  const name = match?.[1]?.toLowerCase();
+  if (!name) return undefined;
+
+  return name === "run_command" || commandNames.includes(name)
+    ? name
+    : undefined;
+}
+
+export function detectFileAction(rawText: string): FileAction | undefined {
+  const command = readInstruction(rawText);
 
   const wantsCreate =
     /^(?:bikin(?:kan|in)?|buat(?:kan|in)?|create|generate)\b/i.test(command);

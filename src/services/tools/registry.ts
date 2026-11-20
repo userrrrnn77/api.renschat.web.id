@@ -27,6 +27,7 @@ export interface ToolContext {
 
 export interface ToolResult {
   ok: boolean;
+  errorCode?: string;
   /** JSON text ≤2KB dikirim balik ke model. */
   content: string;
   /** Kalau true, giliran diakhiri setelah tool ini. */
@@ -120,6 +121,7 @@ export function errorResult(
   if (hint !== undefined) payload.hint = hint;
   return {
     ok: false,
+    errorCode: code,
     content: truncateResult(JSON.stringify(payload), maxLen),
   };
 }

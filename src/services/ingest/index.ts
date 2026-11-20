@@ -144,7 +144,31 @@ async function processOne(fileId: string): Promise<void> {
       const bytes = await storage.readBytes(doc.storage.key, length);
       const buf = Buffer.from(bytes);
 
-      const ex = await extract(buf, doc.name, doc.mime);
+      let ex: Awaited<ReturnType<typeof extract>>;
+
+      try {
+        ex = await extract(buf, doc.name, doc.mime);
+      } catch (err) {
+        if (doc.origin !== "upload") throw err;
+
+        logger.warn(
+          { err, fileId },
+          "uploaded file saved without extracted text",
+        );
+
+        await FileDocModel.updateOne(
+          { _id: doc._id, status: "processing" },
+          {
+            $set: {
+              status: "ready",
+              indexStatus: "disabled",
+              summaryLine:
+                "Attachment available for download. Text extraction failed.",
+            },
+          },
+        );
+        return;
+      }
 
       let text = ex.text;
       let truncated = ex.truncated ?? false;

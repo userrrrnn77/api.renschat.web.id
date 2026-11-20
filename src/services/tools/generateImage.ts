@@ -8,6 +8,13 @@ import { AppError } from "../../middleware/error.js";
 const GenerateImageSchema = z.object({
   prompt: z.string().min(1).max(2000),
   aspect_ratio: z.enum(["1:1", "16:9", "9:16"]).optional(),
+  use_references: z
+    .boolean()
+    .optional()
+    .describe(
+      "Gunakan gambar yang dilampirkan pada pesan ini untuk editing. " +
+        "Set false bila user secara eksplisit meminta gambar baru yang independen.",
+    ),
 });
 
 // ─── generate_image (§11.3, kind "media") ────────────────────────────────
@@ -32,6 +39,16 @@ registerTool({
     const a = GenerateImageSchema.parse(args);
 
     try {
+      if (
+        a.use_references === true &&
+        ctx.generation.referenceImageIds.length === 0
+      ) {
+        return errorResult(
+          "IMAGE_REFERENCE_REQUIRED",
+          "Lampirkan gambar yang ingin diedit pada pesan ini.",
+        );
+      }
+
       const result = await runImageGeneration(
         {
           userId: ctx.userId,
@@ -40,7 +57,12 @@ registerTool({
           signal: ctx.abortSignal,
           generation: ctx.generation,
         },
-        { prompt: a.prompt, aspect: a.aspect_ratio },
+        {
+          prompt: a.prompt,
+          aspect: a.aspect_ratio,
+          referenceImageIds:
+            a.use_references === false ? [] : ctx.generation.referenceImageIds,
+        },
       );
 
       // Block hanya dikirim SETELAH media aman di R2 + FileDoc (§10.1).

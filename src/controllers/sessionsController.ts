@@ -152,6 +152,7 @@ export async function getSession(req: Request, res: Response): Promise<void> {
             })
           : m.blocks,
       status: m.status,
+      ...(m.errorCode ? { errorCode: m.errorCode } : {}),
       ...(m.sources !== undefined ? { sources: m.sources } : {}),
       ...(m.truncated ? { truncated: true } : {}),
       createdAt: m.createdAt.toISOString(),

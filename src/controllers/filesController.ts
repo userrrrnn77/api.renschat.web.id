@@ -62,7 +62,53 @@ const TEXT_MIMES = new Set([
   "application/yaml",
 ]);
 
-const ZIP_BASED_EXTS = new Set(["docx", "xlsx", "pptx", "odt", "odp"]);
+const VIDEO_EXTS = new Set([
+  "mp4",
+  "m4v",
+  "mov",
+  "qt",
+  "mkv",
+  "webm",
+  "avi",
+  "wmv",
+  "flv",
+  "mpg",
+  "mpeg",
+  "mpe",
+  "m2v",
+  "mpv",
+  "vob",
+  "ogv",
+  "3gp",
+  "3g2",
+  "mts",
+  "m2ts",
+  "mxf",
+  "f4v",
+  "asf",
+  "y4m",
+  "h264",
+  "h265",
+  "hevc",
+]);
+
+const ZIP_OFFICE_MIMES: Record<string, string> = {
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  odt: "application/vnd.oasis.opendocument.text",
+  odp: "application/vnd.oasis.opendocument.presentation",
+};
+
+const RASTER_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/bmp",
+  "image/avif",
+  "image/tiff",
+]);
 
 function isTextish(mime: string, name: string): boolean {
   if (mime.startsWith("text/")) return true;
@@ -71,38 +117,123 @@ function isTextish(mime: string, name: string): boolean {
   return TEXT_EXTS.has(ext);
 }
 
-function looksLikeText(buf: Uint8Array): boolean {
-  const n = Math.min(buf.length, 4096);
-  for (let i = 0; i < n; i++) {
-    if (buf[i] === 0) return false;
+function ext(name: string): string {
+  return /\.([^.]+)$/.exec(name)?.[1]?.toLowerCase() ?? "";
+}
+
+function videoError(): AppError {
+  return new AppError(
+    "UNSUPPORTED_MIME",
+    415,
+    "Video uploads are not supported",
+  );
+}
+
+function basicMimeCheck(name: string, mime: string): void {
+  const suffix = ext(name);
+  const type = mime.split(";")[0]?.trim().toLowerCase() ?? "";
+
+  if (VIDEO_EXTS.has(suffix)) throw videoError();
+
+  // .ts juga dipakai untuk MPEG transport stream. Putuskan saat complete.
+  if (type.startsWith("video/") && suffix !== "ts") throw videoError();
+}
+
+function looksLikeText(bytes: Uint8Array, partial: boolean): boolean {
+  // Izinkan tab, newline, carriage return, dan form feed.
+  if (bytes.some((b) => b < 32 && ![9, 10, 12, 13].includes(b))) {
+    return false;
   }
+
   try {
-    new TextDecoder("utf-8", { fatal: true }).decode(buf.subarray(0, n));
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes, {
+      stream: partial,
+    });
     return true;
   } catch {
     return false;
   }
 }
 
-function ext(name: string): string {
-  return (name.split(".").pop() ?? "").toLowerCase();
-}
+async function classifyUpload(bytes: Uint8Array, name: string, size: number) {
+  const suffix = ext(name);
+  const binary = { mime: "application/octet-stream", ingest: false };
+  const text = looksLikeText(bytes, bytes.length < size);
 
-function basicMimeCheck(name: string, mime: string): void {
-  const e = ext(name);
-  if (!e) throw AppError.badRequest("File has no extension");
-
-  if (mime.startsWith("image/")) {
-    const imgExt = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
-    if (!imgExt.includes(e)) {
-      throw new AppError("UNSUPPORTED_MIME", 415, `Ext .${e} != ${mime}`);
+  // Cek juga transport stream jika MIME browser kosong atau salah.
+  for (const [offset, stride] of [
+    [0, 188],
+    [4, 192],
+    [0, 204],
+  ] as const) {
+    if (
+      bytes[offset] === 0x47 &&
+      bytes[offset + stride] === 0x47 &&
+      bytes[offset + 2 * stride] === 0x47 &&
+      !text
+    ) {
+      throw videoError();
     }
-    return;
   }
 
-  if (mime === "application/pdf" && e !== "pdf") {
-    throw new AppError("UNSUPPORTED_MIME", 415, "Ext != pdf");
+  let detected: Awaited<ReturnType<typeof fileTypeFromBuffer>>;
+  try {
+    detected = await fileTypeFromBuffer(bytes);
+  } catch (err) {
+    // Beberapa format butuh byte lebih banyak daripada sampel header.
+    logger.debug({ err, name }, "upload signature could not be identified");
   }
+
+  const mime = detected?.mime;
+  if (mime?.startsWith("video/") || mime === "application/mxf") {
+    throw videoError();
+  }
+  if (suffix === "ts" && !text) throw videoError();
+
+  if (mime === "application/pdf" || (mime && RASTER_MIMES.has(mime))) {
+    return { mime, ingest: true };
+  }
+
+  const zip =
+    bytes[0] === 0x50 &&
+    bytes[1] === 0x4b &&
+    bytes[2] === 0x03 &&
+    bytes[3] === 0x04;
+
+  const officeMime = Object.hasOwn(ZIP_OFFICE_MIMES, suffix)
+    ? ZIP_OFFICE_MIMES[suffix]
+    : undefined;
+
+  if (zip && officeMime) return { mime: officeMime, ingest: true };
+
+  const ole = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1].every(
+    (value, index) => bytes[index] === value,
+  );
+
+  if (ole && suffix === "xls") {
+    return { mime: "application/vnd.ms-excel", ingest: true };
+  }
+  if (ole && suffix === "ppt") {
+    return { mime: "application/vnd.ms-powerpoint", ingest: true };
+  }
+
+  if (
+    text &&
+    (!mime ||
+      mime.startsWith("text/") ||
+      isTextish(mime, "") ||
+      mime === "application/rtf" ||
+      mime === "image/svg+xml")
+  ) {
+    if (suffix === "json") return { mime: "application/json", ingest: true };
+    if (suffix === "csv") return { mime: "text/csv", ingest: true };
+    if (suffix === "md" || suffix === "markdown") {
+      return { mime: "text/markdown", ingest: true };
+    }
+    return { mime: "text/plain", ingest: true };
+  }
+
+  return binary;
 }
 
 /** Media generated yang sudah lewat expiresAt atau sudah di-flush (§6.4). */
@@ -214,11 +345,52 @@ export async function completeUpload(
   }
 
   const maxBytes = env.MAX_UPLOAD_MB * 1024 * 1024;
-  if (head.size > maxBytes) {
+  let actualSize = head.size;
+
+  if (actualSize === 0 && doc.size > 0) {
+    // Periksa isi objek sebelum menolak upload berdasarkan stat() yang nol.
+    const stream = await storage.getStream(doc.storage.key);
+    const reader = stream.getReader();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        actualSize += value.byteLength;
+        if (actualSize > maxBytes) {
+          await reader.cancel();
+          break;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    logger.warn(
+      {
+        fileId: id,
+        declaredSize: doc.size,
+        statSize: head.size,
+        bytesRead: actualSize,
+      },
+      "checked upload contents after storage reported zero bytes",
+    );
+  }
+
+  if (actualSize > maxBytes) {
     await storage.delete(doc.storage.key).catch(() => {});
-    await markFailed(`Actual size ${head.size} exceeds limit`);
+    await markFailed(`Actual size exceeds ${maxBytes} bytes`);
     throw new AppError("PAYLOAD_TOO_LARGE", 413, "Actual size exceeds limit");
   }
+
+  if (actualSize !== doc.size) {
+    const message = `Size mismatch: declared ${doc.size}, actual ${actualSize}`;
+    await storage.delete(doc.storage.key).catch(() => {});
+    await markFailed(message);
+    throw new AppError("SIZE_MISMATCH", 415, message);
+  }
+
   if (head.size !== doc.size) {
     await storage.delete(doc.storage.key).catch(() => {});
     await markFailed(
@@ -231,55 +403,34 @@ export async function completeUpload(
     );
   }
 
-  let detectedMime = doc.mime;
-  try {
-    const magic = await storage.readBytes(doc.storage.key, MAGIC_BYTES_LEN);
-    const detected = await fileTypeFromBuffer(magic);
+  let classification: Awaited<ReturnType<typeof classifyUpload>>;
 
-    if (detected) {
-      const sameFamily =
-        detected.mime === doc.mime ||
-        (detected.mime === "application/zip" &&
-          ZIP_BASED_EXTS.has(ext(doc.name)));
-      if (!sameFamily) {
-        await storage.delete(doc.storage.key).catch(() => {});
-        await markFailed(`Magic mismatch: detected ${detected.mime}`);
-        throw new AppError(
-          "UNSUPPORTED_MIME",
-          415,
-          `Magic bytes mismatch (detected ${detected.mime}, claimed ${doc.mime})`,
-        );
-      }
-      detectedMime = detected.mime;
-    } else if (isTextish(doc.mime, doc.name)) {
-      if (!looksLikeText(magic)) {
-        await storage.delete(doc.storage.key).catch(() => {});
-        await markFailed("Binary content claimed as text");
-        throw new AppError(
-          "UNSUPPORTED_MIME",
-          415,
-          "File content is binary but claimed as text",
-        );
-      }
-    } else {
-      await storage.delete(doc.storage.key).catch(() => {});
-      await markFailed("Unrecognized file type");
-      throw new AppError("UNSUPPORTED_MIME", 415, "Unrecognized file type");
-    }
+  try {
+    basicMimeCheck(doc.name, doc.mime);
+    const bytes = await storage.readBytes(doc.storage.key, MAGIC_BYTES_LEN);
+    classification = await classifyUpload(bytes, doc.name, actualSize);
   } catch (err) {
-    if (err instanceof AppError) throw err;
-    logger.error({ err, fileId: id }, "magic byte verification failed");
+    if (err instanceof AppError) {
+      await markFailed(err.message);
+      await storage.delete(doc.storage.key).catch(() => {});
+      throw err;
+    }
+
+    logger.error({ err, fileId: id }, "upload verification failed");
     await markFailed("Verification error");
     throw new AppError("VERIFY_FAILED", 500, "File verification failed");
   }
 
-  doc.status = "processing";
-  doc.mime = detectedMime;
+  doc.mime = classification.mime;
+  doc.status = classification.ingest ? "processing" : "ready";
   doc.error = undefined;
-  doc.indexStatus = env.EMBEDDING_ENABLED ? "pending" : "disabled";
+  doc.indexStatus =
+    classification.ingest && env.EMBEDDING_ENABLED ? "pending" : "disabled";
   await doc.save();
 
-  enqueueIngestion(doc._id.toString());
+  if (classification.ingest) {
+    enqueueIngestion(doc._id.toString());
+  }
 
   res.json({
     id: doc._id.toString(),
@@ -378,6 +529,14 @@ export async function getFileUrl(req: Request, res: Response): Promise<void> {
   }
 
   const storage = getStorage();
+
+  if (
+    doc.origin === "upload" &&
+    (doc.status === "failed" || !RASTER_MIMES.has(doc.mime))
+  ) {
+    throw new AppError("UNSUPPORTED_MIME", 415, "Use the download endpoint");
+  }
+
   const url = await storage.presignGet(doc.storage.key, {
     expiresInSec: env.ASSET_URL_TTL_SECONDS,
   });

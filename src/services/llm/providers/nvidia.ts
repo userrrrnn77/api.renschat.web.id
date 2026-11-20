@@ -1,5 +1,4 @@
-// src/services/llm/providers/nvidia.ts
-import { chatStream } from "../nvidiaClient.js";
+import { chatStream, UpstreamError } from "../nvidiaClient.js";
 import { mapReasoning } from "../reasoningMap.js";
 import type {
   LlmProvider,
@@ -28,14 +27,18 @@ export class NvidiaProvider implements LlmProvider {
       input.signal,
     );
 
+    let receivedChoice = false;
+    let chunkCount = 0;
+
     for await (const chunk of stream) {
-      const choice = chunk.choices[0];
+      chunkCount++;
+
+      const choice = chunk.choices?.[0];
+      if (choice) receivedChoice = true;
+
       const delta = choice?.delta;
       const finishReason = choice?.finish_reason ?? null;
 
-      // Jangan skip kalau punya finishReason atau usage — chunk final
-      // sering tidak punya `delta` tapi justru membawa finish_reason
-      // (termasuk "length"). Skip hanya kalau benar-benar kosong.
       if (!delta && !finishReason && !chunk.usage) continue;
 
       yield {
@@ -45,6 +48,14 @@ export class NvidiaProvider implements LlmProvider {
         usage: chunk.usage,
         finishReason,
       };
+    }
+
+    // Baru periksa setelah chatStream selesai diiterasi.
+    if (!receivedChoice && !input.signal?.aborted) {
+      throw new UpstreamError(
+        502,
+        `NVIDIA stream ended without choices (parsedChunks=${chunkCount})`,
+      );
     }
   }
 }

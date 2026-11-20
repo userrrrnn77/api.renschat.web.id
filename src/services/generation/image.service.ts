@@ -5,7 +5,9 @@ import { UserModel } from "../../models/User.js";
 import { AppError } from "../../middleware/error.js";
 import { logger } from "../../config/logger.js";
 import { generateImageFlux2 } from "@services/llm/providers/flux2.client.js";
-import { generateImageFlux3 } from "@services/llm/providers/flux3.client.js";
+import { FileDocModel } from "../../models/FileDoc.js";
+import { getStorage } from "../../storage/index.js";
+import { editFlux2Image } from "../llm/providers/flux2.edit.js";
 import { saveGeneratedMedia, detectImageMime } from "../tools/saveGenerated.js";
 import { consumeCredit, refundJobCredits } from "../credits.service.js";
 import {
@@ -103,6 +105,7 @@ export interface RunImageGenerationContext {
 
 export interface RunImageGenerationArgs {
   prompt: string;
+  referenceImageIds?: readonly string[];
   /** Default "1:1" bila tool tidak mengirim (keputusan §21-style). */
   aspect?: ImageAspect;
 }
@@ -141,22 +144,72 @@ export async function runImageGeneration(
   // ── 2. Kill switch (§8.4) ──
   assertMediaEnabled();
 
-  const model: ImageModelId =
-    ctx.generation.imageModel === "flux3-klein" ? "flux3-klein" : "flux2-klein";
-  const engine = model === "flux3-klein" ? "flux3" : "flux2";
+  const model = "flux2-klein" as const;
+  const engine = "flux2" as const;
+  const refIds = [...(args.referenceImageIds ?? [])];
 
-  // ── 3. Entitlement + budget + limit + job aktif (§8.1/§8.3/§8.4) ──
-  const user = (await UserModel.findById(ctx.userId)
-    .select({ credits: 1, donorSince: 1, createdAt: 1 })
-    .lean()) as unknown as (EntitlementUser & { createdAt?: Date }) | null;
+  if (refIds.length > 4) {
+    throw new AppError(
+      "IMAGE_REFERENCE_LIMIT",
+      400,
+      "Maksimal 4 gambar referensi untuk satu permintaan edit.",
+    );
+  }
+
+  const user = await UserModel.findById(ctx.userId)
+    .select({ createdAt: 1 })
+    .lean();
+
   if (!user) throw AppError.notFound();
 
-  if (model === "flux3-klein") assertFlux3Allowed(user);
   await assertGlobalDailyCap(engine);
-  if (model === "flux2-klein") {
-    await assertUserDailyLimit(ctx.userId, "image_flux2", user.createdAt);
-  }
+  await assertUserDailyLimit(ctx.userId, "image_flux2", user.createdAt);
   await assertNoActiveJob(ctx.userId);
+
+  const imageUrls: string[] = [];
+
+  if (refIds.length > 0) {
+    if (!process.env.FAL_KEY?.trim()) {
+      throw new AppError(
+        "IMAGE_EDIT_UNAVAILABLE",
+        503,
+        "Edit gambar upload belum aktif di server ini.",
+      );
+    }
+
+    const docs = await FileDocModel.find({
+      _id: { $in: refIds },
+      userId: ctx.userId,
+      sessionId: ctx.sessionId,
+      status: "ready",
+      expired: { $ne: true },
+      $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }],
+    })
+      .select({ mime: 1, storage: 1 })
+      .lean();
+
+    const byId = new Map(docs.map((doc) => [String(doc._id), doc]));
+    const storage = getStorage();
+
+    for (const id of refIds) {
+      const doc = byId.get(id);
+      if (
+        !doc ||
+        doc.storage.driver !== "r2" ||
+        !["image/png", "image/jpeg", "image/webp"].includes(doc.mime)
+      ) {
+        throw new AppError(
+          "IMAGE_REFERENCE_INVALID",
+          400,
+          "Referensi harus berupa PNG, JPEG, atau WebP yang tersedia di chat ini.",
+        );
+      }
+
+      imageUrls.push(
+        await storage.presignGet(doc.storage.key, { expiresInSec: 600 }),
+      );
+    }
+  }
 
   // ── 4. Job + konsumsi kredit atomik (§11.2 langkah 5) ──
   const startMs = Date.now();
@@ -169,7 +222,7 @@ export async function runImageGeneration(
     engine,
     status: "running",
     params: { aspect, modelId: model },
-    creditCost: { imageFlux3: model === "flux3-klein" ? 1 : 0, videoCosmos: 0 },
+    creditCost: { imageFlux3: 0, videoCosmos: 0 },
     attempts: 1,
     queuedAt: now,
     startedAt: now,
@@ -189,34 +242,12 @@ export async function runImageGeneration(
     );
   };
 
-  let creditConsumed = false;
-
   try {
-    if (model === "flux3-klein") {
-      const ok = await consumeCredit(ctx.userId, "imageFlux3", jobIdStr);
-      if (!ok) {
-        await finishFailed(
-          "INSUFFICIENT_CREDITS",
-          "Kredit gambar FLUX.3 habis.",
-        );
-        throw new AppError(
-          "INSUFFICIENT_CREDITS",
-          402,
-          "Kredit gambar FLUX.3 habis. Donasi lagi untuk menambah kredit.",
-        );
-      }
-      creditConsumed = true;
-    }
-
-    // ── 5. Provider call dalam slot semaphore global (§8.3) ──
     const size = resolveImageSize(aspect, model);
     const json = await withImageSlot(
       () =>
-        model === "flux3-klein"
-          ? generateImageFlux3(
-              { prompt, width: size.width, height: size.height },
-              ctx.signal,
-            )
+        imageUrls.length > 0
+          ? editFlux2Image(prompt, imageUrls, size, ctx.signal)
           : generateImageFlux2(
               { prompt, width: size.width, height: size.height },
               ctx.signal,
@@ -247,7 +278,7 @@ export async function runImageGeneration(
       height: size.height,
       aspect,
       engine,
-      model: model === "flux3-klein" ? "flux-3-image-klein" : "flux.2-klein-4b",
+      model: "flux.2-klein-4b",
       buf,
     });
 
@@ -289,17 +320,6 @@ export async function runImageGeneration(
       expiresAt: saved.expiresAt.toISOString(),
     };
   } catch (err) {
-    // ── 8. Error apa pun setelah job dibuat → refund idempotent (§7.8) ──
-    if (creditConsumed) {
-      try {
-        await refundJobCredits(job);
-      } catch (refundErr) {
-        logger.error(
-          { err: refundErr, jobId: jobIdStr },
-          "image refund failed",
-        );
-      }
-    }
     const code = err instanceof AppError ? err.code : "PROVIDER_ERROR";
     const message =
       err instanceof Error ? err.message : "Image generation failed";
@@ -312,7 +332,7 @@ export async function runImageGeneration(
         status: ctx.signal.aborted ? "cancelled" : "failed",
         durationMs: Date.now() - startMs,
         errorCode: code,
-        refunded: creditConsumed,
+        refunded: false,
       },
       "image job finished",
     );

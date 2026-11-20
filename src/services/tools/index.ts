@@ -31,6 +31,10 @@ function buildModelParameters(
   const schema = z.toJSONSchema(tool.schema, {
     target: "draft-7",
     io: "input",
+    override: ({ jsonSchema }) => {
+      // Grammar NVIDIA menolak propertyNames pada schema argumen tool.
+      delete jsonSchema.propertyNames;
+    },
   }) as Record<string, unknown>;
 
   if (tool.name !== "create_file") return schema;

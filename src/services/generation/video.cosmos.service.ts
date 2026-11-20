@@ -13,7 +13,7 @@ import {
   mapAspectToCosmosResolution,
 } from "@services/llm/providers/cosmos.client.js";
 import { saveGeneratedMedia } from "../tools/saveGenerated.js";
-import { consumeCredit, refundJobCredits } from "../credits.service.js";
+
 import {
   assertMediaEnabled,
   assertGlobalDailyCap,
@@ -21,7 +21,7 @@ import {
   incrementGlobalDaily,
   withVideoSlot,
 } from "./budget.service.js";
-import { canUseCosmos, type EntitlementUser } from "../entitlements.service.js";
+
 import type { GenerationPlan } from "./plan.js";
 
 export type VideoAspect = "16:9" | "9:16";
@@ -188,19 +188,10 @@ export async function runCosmosVideoJob(
   // ── 2. Kill switch (§8.4) ──
   assertMediaEnabled();
 
-  // ── 3. Entitlement + budget + job aktif (§8.2/§8.3/§8.4) ──
-  const user = (await UserModel.findById(ctx.userId)
-    .select({ credits: 1, donorSince: 1, createdAt: 1 })
-    .lean()) as unknown as (EntitlementUser & { createdAt?: Date }) | null;
-  if (!user) throw AppError.notFound();
-
-  if (!canUseCosmos(user)) {
-    throw new AppError(
-      "ENTITLEMENT_REQUIRED",
-      403,
-      "Model video Cosmos hanya untuk donatur dengan kredit.",
-    );
+  if (!(await UserModel.exists({ _id: ctx.userId }))) {
+    throw AppError.notFound();
   }
+
   await assertGlobalDailyCap("cosmos");
   await assertNoActiveJob(ctx.userId);
 
@@ -219,7 +210,7 @@ export async function runCosmosVideoJob(
       resolution: mapAspectToCosmosResolution(aspect),
       numFrames: env.COSMOS_NUM_FRAMES,
     },
-    creditCost: { imageFlux3: 0, videoCosmos: 1 },
+    creditCost: { imageFlux3: 0, videoCosmos: 0 },
     attempts: 1,
     queuedAt: now,
     startedAt: now,
@@ -241,20 +232,7 @@ export async function runCosmosVideoJob(
     );
   };
 
-  let creditConsumed = false;
-
   try {
-    const ok = await consumeCredit(ctx.userId, "videoCosmos", jobIdStr);
-    if (!ok) {
-      await finishFailed("INSUFFICIENT_CREDITS", "Kredit video Cosmos habis.");
-      throw new AppError(
-        "INSUFFICIENT_CREDITS",
-        402,
-        "Kredit video Cosmos habis. Donasi lagi untuk menambah kredit.",
-      );
-    }
-    creditConsumed = true;
-
     // ── 5. Provider call dalam slot semaphore global video (§8.3) ──
     const output = await withVideoSlot(
       () => generateVideoCosmos({ prompt, aspect }, ctx.signal),
@@ -355,21 +333,17 @@ export async function runCosmosVideoJob(
       expiresAt: saved.expiresAt.toISOString(),
     };
   } catch (err) {
-    // ── 9. Error setelah job dibuat → refund idempotent (§7.8, §14.3) ──
-    if (creditConsumed) {
-      try {
-        await refundJobCredits(job);
-      } catch (refundErr) {
-        logger.error(
-          { err: refundErr, jobId: jobIdStr },
-          "cosmos refund failed",
-        );
-      }
-    }
     const code = err instanceof AppError ? err.code : "PROVIDER_ERROR";
     const message =
       err instanceof Error ? err.message : "Cosmos video generation failed";
-    await finishFailed(code, message).catch(() => {});
+
+    await finishFailed(code, message).catch((statusErr) => {
+      logger.error(
+        { err: statusErr, jobId: jobIdStr },
+        "Failed to update Cosmos job status",
+      );
+    });
+
     logger.info(
       {
         jobId: jobIdStr,
@@ -378,10 +352,11 @@ export async function runCosmosVideoJob(
         status: ctx.signal.aborted ? "cancelled" : "failed",
         durationMs: Date.now() - startMs,
         errorCode: code,
-        refunded: creditConsumed,
+        refunded: false,
       },
       "cosmos job finished",
     );
+
     throw err;
   }
 }

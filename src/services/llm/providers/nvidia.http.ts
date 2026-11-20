@@ -144,5 +144,5 @@ export async function postCosmosGeneration(
   body: unknown,
   opts: MediaPostOptions,
 ): Promise<MediaPostResult> {
-  return postWithBaseUrl(GENAI_BASE_URL, path, body, opts);
+  return postWithBaseUrl(COSMOS_BASE_URL, path, body, opts);
 }

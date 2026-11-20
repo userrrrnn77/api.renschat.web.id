@@ -58,8 +58,12 @@ export interface AgentInput {
   allowedTools: ReadonlySet<string>;
   /** Plan generation turn ini; diteruskan ke ToolContext. */
   generation: GenerationPlan;
+  resolveMediaAspect?: (
+    kind: "image" | "video",
+  ) => Promise<"1:1" | "16:9" | "9:16">;
   askClarification?: (q: ClarificationQuestion) => Promise<string[]>;
   fileAction?: FileAction;
+  terminalIntent?: string;
 }
 
 export interface AgentResult {
@@ -116,6 +120,7 @@ async function executeWithRepair(
   argsStr: string,
   ctx: ToolContext,
   fileAction?: FileAction,
+  resolveMediaAspect?: AgentInput["resolveMediaAspect"],
 ): Promise<ToolResult> {
   // Tidak ada retry args yang sama: kalau tool.run side-effect (R2/DB)
   // sukses tapi langkah berikutnya gagal, retry bikin orphan. Model
@@ -140,6 +145,29 @@ async function executeWithRepair(
       return await tool.run({ ...parsed, present: true }, ctx);
     }
 
+    if (tool.kind === "media") {
+      if (
+        !resolveMediaAspect ||
+        !parsed ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed)
+      ) {
+        return errorResult(
+          "INVALID_ARGS",
+          "Tidak dapat menentukan format media.",
+        );
+      }
+
+      const kind = tool.name === "generate_image" ? "image" : "video";
+      const aspect = await resolveMediaAspect(kind);
+
+      if (ctx.abortSignal.aborted) {
+        throw new ClarificationAbortedError();
+      }
+
+      return await tool.run({ ...parsed, aspect_ratio: aspect }, ctx);
+    }
+
     return await tool.run(parsed, ctx);
   } catch (err) {
     // Error klarifikasi harus propagate ke agentLoop (bukan diubah jadi
@@ -154,6 +182,23 @@ async function executeWithRepair(
     return errorResult("INVALID_ARGS", `Args tidak sesuai schema: ${msg}`, {
       tool: tool.name,
     });
+  }
+}
+
+function commandFailureCode(code: string | undefined): string {
+  switch (code) {
+    case "INVALID_ARGS":
+    case "INVALID_JSON":
+    case "INVALID_EXPRESSION":
+      return "COMMAND_INVALID_INPUT";
+    case "TIMEOUT":
+      return "COMMAND_TIMEOUT";
+    case "RATE_LIMIT":
+      return "COMMAND_RATE_LIMIT";
+    case "COMMAND_NOT_ALLOWED":
+      return "COMMAND_NOT_ALLOWED";
+    default:
+      return "COMMAND_FAILED";
   }
 }
 
@@ -183,7 +228,10 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
 
   const provider = getProvider();
 
-  for (let iter = 0; iter < MAX_ITER; iter++) {
+  agentIterations: for (let iter = 0; iter < MAX_ITER; iter++) {
+    const terminalFirstStep = iter === 0 && Boolean(input.terminalIntent);
+    const requiredTool =
+      input.fileAction ?? (terminalFirstStep ? "run_command" : undefined);
     if (input.signal.aborted) {
       aborted = true;
       break;
@@ -281,10 +329,10 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         ...(currentTools.length > 0
           ? {
               tools: currentTools,
-              toolChoice: input.fileAction
+              toolChoice: requiredTool
                 ? {
                     type: "function" as const,
-                    function: { name: input.fileAction },
+                    function: { name: requiredTool },
                   }
                 : ("auto" as const),
             }
@@ -304,7 +352,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           thinking.push(chunk.thinking);
         }
 
-        if (chunk.content && !input.fileAction) {
+        if (chunk.content && !requiredTool) {
           if (!firstContentOrToolSeen) {
             firstContentOrToolSeen = true;
             thinking.end();
@@ -430,6 +478,31 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
       break;
     }
 
+    if (terminalFirstStep) {
+      const call = calls[0];
+      let matchesRequest = calls.length === 1 && call?.name === "run_command";
+
+      if (matchesRequest && call && input.terminalIntent !== "run_command") {
+        try {
+          const args: unknown = JSON.parse(call.args);
+
+          matchesRequest =
+            typeof args === "object" &&
+            args !== null &&
+            "command" in args &&
+            args.command === input.terminalIntent;
+        } catch {
+          matchesRequest = false;
+        }
+      }
+
+      if (!matchesRequest) {
+        errorCode = "COMMAND_NOT_EXECUTED";
+        error = "The requested command was not executed.";
+        break;
+      }
+    }
+
     if (calls.length === 0) {
       if (input.fileAction) {
         errorCode = "FILE_ACTION_INCOMPLETE";
@@ -516,6 +589,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
               askClarification: input.askClarification,
             },
             input.fileAction,
+            input.resolveMediaAspect,
           );
         }
       } catch (err) {
@@ -542,6 +616,15 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         input.callbacks.onToolEnd(call.id, false, "aborted");
         aborted = true;
         break;
+      }
+
+      if (terminalFirstStep && call.name === "run_command" && !toolResult.ok) {
+        const code = commandFailureCode(toolResult.errorCode);
+
+        input.callbacks.onToolEnd(call.id, false, code);
+        errorCode = code;
+        error = code;
+        break agentIterations;
       }
 
       if (input.fileAction && !toolResult.ok) {

@@ -63,16 +63,37 @@ export const r2Storage: StorageProvider = {
   },
 
   async head(key: string): Promise<StorageHeadResult | null> {
-    try {
-      const stat = await client.file(key).stat();
-      if (!stat) return null;
-      return {
-        size: stat.size,
-        ...(stat.type !== undefined ? { contentType: stat.type } : {}),
-      };
-    } catch {
-      return null;
+    const url = client.presign(key, {
+      method: "HEAD",
+      expiresIn: 60,
+    });
+
+    const response = await fetch(url, {
+      method: "HEAD",
+      headers: { "Accept-Encoding": "identity" },
+    });
+
+    if (response.status === 404) return null;
+
+    if (!response.ok) {
+      throw new Error(`R2 HEAD failed with HTTP ${response.status}`);
     }
+
+    const length = response.headers.get("content-length");
+    if (length === null || !/^\d+$/.test(length)) {
+      throw new Error("R2 HEAD returned no valid Content-Length");
+    }
+
+    const size = Number(length);
+    if (!Number.isSafeInteger(size)) {
+      throw new Error("R2 HEAD returned an invalid object size");
+    }
+
+    const contentType = response.headers.get("content-type");
+    return {
+      size,
+      ...(contentType !== null ? { contentType } : {}),
+    };
   },
 
   async getStream(key: string): Promise<ReadableStream<Uint8Array>> {

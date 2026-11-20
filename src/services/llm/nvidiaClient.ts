@@ -287,16 +287,65 @@ export async function* chatStream(
               if (data === "[DONE]") return;
               continue;
             }
-            let parsed: StreamChunk;
+            let frame: unknown;
+
             try {
-              parsed = JSON.parse(data) as StreamChunk;
-            } catch (parseErr) {
-              logger.warn(
-                { sample: data.slice(0, 120), err: String(parseErr) },
-                "skip malformed SSE chunk",
-              );
-              continue;
+              frame = JSON.parse(data);
+            } catch {
+              throw new UpstreamError(502, "Invalid JSON in NVIDIA stream");
             }
+
+            if (
+              frame === null ||
+              typeof frame !== "object" ||
+              Array.isArray(frame)
+            ) {
+              throw new UpstreamError(502, "Invalid NVIDIA stream event");
+            }
+
+            const event = frame as Record<string, unknown>;
+
+            if (
+              event.error != null ||
+              (event.detail != null && !Array.isArray(event.choices))
+            ) {
+              const detail = event.error ?? event.detail;
+              const info =
+                detail !== null && typeof detail === "object"
+                  ? (detail as Record<string, unknown>)
+                  : undefined;
+
+              const rawStatus = info?.status ?? info?.code ?? event.status;
+              const status = Number(rawStatus);
+              const message =
+                typeof detail === "string"
+                  ? detail
+                  : typeof info?.message === "string"
+                    ? info.message
+                    : "NVIDIA returned an error event";
+
+              throw new UpstreamError(
+                Number.isInteger(status) && status >= 400 && status <= 599
+                  ? status
+                  : 502,
+                message,
+              );
+            }
+
+            if (event.choices != null && !Array.isArray(event.choices)) {
+              throw new UpstreamError(
+                502,
+                "Invalid choices field in NVIDIA stream",
+              );
+            }
+
+            if (!Array.isArray(event.choices)) {
+              if (!event.usage) continue;
+              event.choices = [];
+            }
+
+            const parsed = event as unknown as StreamChunk;
+            
             if (parsed.choices?.[0]?.finish_reason) {
               logger.info(
                 {

@@ -48,6 +48,7 @@ export interface IMessage {
   usage?: ILlmUsage;
   sources?: IMessageSource[];
   truncated?: boolean;
+  errorCode?: string;
   tokenEstimate: number;
   summarized: boolean;
   createdAt: Date;
@@ -137,6 +138,7 @@ const messageSchema = new Schema<IMessage>(
     usage: { type: usageSchema, default: undefined },
     sources: { type: [sourceSchema], default: undefined },
     truncated: Boolean,
+    errorCode: String,
     tokenEstimate: { type: Number, default: 0 },
     summarized: { type: Boolean, default: false },
   },

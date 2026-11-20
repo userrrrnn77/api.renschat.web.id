@@ -4,6 +4,7 @@ import { registerTool, okResult, errorResult } from "./registry.js";
 import { runCosmosVideoJob } from "@services/generation/video.cosmos.service.js";
 import { mediaUserMessage } from "@services/generation/mediaErrors.js";
 import { AppError } from "../../middleware/error.js";
+import { renderPythonFallback } from "./cosmosFallback.js";
 
 const GenerateVideoCosmosSchema = z.object({
   prompt: z.string().min(1).max(1500),
@@ -25,7 +26,7 @@ registerTool({
   name: "generate_video_cosmos",
   kind: "media",
   description:
-    "Generate satu video pendek (MP4, ~4 detik) dari deskripsi teks memakai model Cosmos3. Khusus donatur dengan kredit. Gunakan saat user secara eksplisit meminta video.",
+    "Buat satu video MP4 pendek saat user meminta video, klip, atau animasi. Backend menangani pemilihan engine dan fallback otomatis.",
   schema: GenerateVideoCosmosSchema,
   async run(args, ctx) {
     // Defense in depth: agentLoop sudah guard allowlist (§8.5).
@@ -109,7 +110,39 @@ registerTool({
         clearInterval(heartbeat);
         heartbeat = null;
       }
-      progress(ctx.abortSignal.aborted ? "cancelled" : "failed");
+      if (ctx.abortSignal.aborted) {
+        progress("cancelled");
+        throw err;
+      }
+
+      progress("failed");
+
+      const canFallback =
+        err instanceof AppError &&
+        ["PROVIDER_ERROR", "RATE_LIMITED", "JOB_TIMEOUT"].includes(err.code);
+
+      if (canFallback) {
+        try {
+          return await renderPythonFallback(
+            a.prompt,
+            a.aspect_ratio ?? ctx.generation.videoAspect,
+            ctx,
+          );
+        } catch (fallbackError) {
+          if (ctx.abortSignal.aborted) throw fallbackError;
+
+          const code =
+            fallbackError instanceof AppError
+              ? fallbackError.code
+              : "PROVIDER_ERROR";
+          const message =
+            fallbackError instanceof AppError
+              ? fallbackError.message
+              : "Video dan versi animasinya belum berhasil dibuat.";
+
+          return errorResult(code, mediaUserMessage(code, message));
+        }
+      }
 
       if (err instanceof AppError) {
         return errorResult(err.code, mediaUserMessage(err.code, err.message));

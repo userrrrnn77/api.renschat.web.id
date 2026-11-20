@@ -20,6 +20,33 @@ export interface HarnessInput {
   generation?: GenerationPlan;
 }
 
+const OFFICE_SUBJECT =
+  /\b(?:transaksi|saldo|mutasi|anggaran|biaya|omzet|laba|arus kas|penjualan|laporan|notul[ae]n|rapat|proyek|jadwal|risiko|tugas|email|surel|invoice|faktur|tagihan|kas|budget|expenses?|revenue|sales|transactions?|balances?|reports?|minutes|meetings?|projects?|tasks?|invoices?|cash flow)\b/i;
+
+const OFFICE_ACTION =
+  /\b(?:buat(?:kan|in)?|bikin(?:kan|in)?|susun(?:kan)?|tulis(?:kan)?|rangkum(?:kan)?|ringkas(?:kan)?|rekap(?:kan)?|revisi|rapikan|hitung(?:kan)?|draft|write|prepare|summari[sz]e|calculate|compile)\b/i;
+
+const OFFICE_ANALYSIS =
+  /\b(?:rekonsiliasi(?:kan)?|cocokkan|bandingkan|bandingin|proyeksikan|prioritaskan|reconcile|compare|forecast|prioriti[sz]e)\b|\b(?:cari|telusuri|jelaskan|find|explain)\s+(?:penyebab\s+)?(?:selisih|varians|variance|discrepanc(?:y|ies))\b/i;
+
+const DEFINITION =
+  /^(?:(?:bre|tolong|please)[,\s]+)*(?:apa (?:itu|arti(?:nya)?|definisi)|what is|what are|define|definition of)\b/i;
+
+function officeComplexity(text: string): "standard" | "complex" | undefined {
+  if (!OFFICE_SUBJECT.test(text)) return undefined;
+
+  const definitionOnly =
+    DEFINITION.test(text.trim()) &&
+    !OFFICE_ACTION.test(text) &&
+    !/[;\n]|\b(?:lalu|kemudian|then)\b/i.test(text);
+
+  if (definitionOnly) return undefined;
+  if (OFFICE_ANALYSIS.test(text)) return "complex";
+  if (OFFICE_ACTION.test(text)) return "standard";
+
+  return undefined;
+}
+
 const HEAVY_VERBS =
   /analisis|bandingkan|debug|rancang|arsitektur|buktikan|optimasi|strategi|step by step|kenapa error/i;
 
@@ -48,9 +75,11 @@ export function classifyTurn(input: HarnessInput): HarnessDecision {
   }
 
   // §8.6: mode generation eksplisit ATAU kata kunci media → paksa MODEL_MAIN.
+  const office = officeComplexity(input.text);
+
   const isMediaRequest =
     (input.generation !== undefined && input.generation.mode !== "auto") ||
-    MEDIA_KEYWORDS.test(input.text);
+    (!office && MEDIA_KEYWORDS.test(input.text));
 
   if (isMediaRequest) {
     return {
@@ -61,7 +90,14 @@ export function classifyTurn(input: HarnessInput): HarnessDecision {
     };
   }
 
+  const isCodingRequest =
+    /\b(?:coding|kode|code|fungsi|function|debug(?:ging)?|refactor|stack\s?trace|typescript|javascript|tsx|jsx|react|express|mongoose|mongodb|sql|api|endpoint|middleware|regex|dockerfile|typeerror|referenceerror|syntaxerror|ts\d{4})\b/i.test(
+      input.text,
+    );
+
   const isSimple =
+    !office &&
+    !isCodingRequest &&
     input.text.length <= 80 &&
     !input.text.includes("```") &&
     !HEAVY_VERBS.test(input.text) &&
@@ -78,6 +114,7 @@ export function classifyTurn(input: HarnessInput): HarnessDecision {
   }
 
   const isComplex =
+    office === "complex" ||
     HEAVY_VERBS.test(input.text) ||
     input.text.includes("```") ||
     input.text.length > 600 ||
